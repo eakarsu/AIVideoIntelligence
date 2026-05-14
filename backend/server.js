@@ -1,23 +1,133 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const pool = require('./db');
 const auth = require('./middleware/auth');
 const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config({ path: __dirname + '/../.env' });
 
+// ─── Startup Validation ─────────────────────────────────────────
+let AI_READY = true;
+if (!process.env.OPENROUTER_API_KEY) {
+  console.error('[STARTUP ERROR] OPENROUTER_API_KEY is not set. AI endpoints will return 503.');
+  AI_READY = false;
+}
+if (!process.env.OPENROUTER_MODEL && process.env.OPENROUTER_API_KEY) {
+  console.warn('[STARTUP WARN] OPENROUTER_MODEL is not set. Defaulting to anthropic/claude-haiku-4.5.');
+}
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
-app.use(cors());
+
+// ─── CORS Config ────────────────────────────────────────────────
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || 'http://localhost:3000';
+const corsOptions = {
+  origin: ALLOWED_ORIGINS.split(',').map(o => o.trim()),
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Signature-256'],
+  credentials: true,
+};
+const io = new Server(server, { cors: { origin: corsOptions.origin, methods: corsOptions.methods } });
+app.use(helmet());
+app.use(cors(corsOptions));
+
+// Raw body capture for webhook HMAC verification (must come before express.json)
+app.use('/api/webhooks', express.raw({ type: '*/*' }));
 app.use(express.json());
+
+// ─── Rate Limiters ───────────────────────────────────────────────
+const aiRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20,
+  keyGenerator: (req) => (req.user && req.user.id) ? String(req.user.id) : req.ip,
+  message: { error: 'AI rate limit exceeded. Max 20 requests per hour.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 const PORT = process.env.BACKEND_PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
+const OPENROUTER_MODEL = 'anthropic/claude-3-5-sonnet-20241022';
+
+// ─── parseAIJson ─────────────────────────────────────────────────
+function parseAIJson(text) {
+  try { return JSON.parse(text); } catch (e) {}
+  const stripped = text.replace(/```(?:json)?\n?/g, '').replace(/```/g, '').trim();
+  try { return JSON.parse(stripped); } catch (e) {}
+  const start = text.indexOf('{'); const end = text.lastIndexOf('}');
+  if (start !== -1 && end !== -1) { try { return JSON.parse(text.slice(start, end + 1)); } catch (e) {} }
+  return null;
+}
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+
+// ─── AI Readiness Guard ─────────────────────────────────────────
+function requireAI(req, res, next) {
+  if (!AI_READY) {
+    return res.status(503).json({ error: 'AI service unavailable: OPENROUTER_API_KEY not configured.' });
+  }
+  next();
+}
+
+// ─── Webhook HMAC Verification ──────────────────────────────────
+function verifyWebhookSignature(req, res, next) {
+  if (!WEBHOOK_SECRET) {
+    // If no secret configured, skip verification but warn
+    console.warn('[WEBHOOK] WEBHOOK_SECRET not set — skipping HMAC verification');
+    // Re-parse body as JSON since express.raw was used
+    try { req.body = JSON.parse(req.body.toString()); } catch (e) { req.body = {}; }
+    return next();
+  }
+  const signature = req.headers['x-signature-256'];
+  if (!signature) {
+    return res.status(401).json({ error: 'Missing X-Signature-256 header' });
+  }
+  const rawBody = req.body; // Buffer from express.raw
+  const expected = 'sha256=' + crypto.createHmac('sha256', WEBHOOK_SECRET).update(rawBody).digest('hex');
+  let sigBuffer, expBuffer;
+  try {
+    sigBuffer = Buffer.from(signature, 'utf8');
+    expBuffer = Buffer.from(expected, 'utf8');
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid signature format' });
+  }
+  if (sigBuffer.length !== expBuffer.length || !crypto.timingSafeEqual(sigBuffer, expBuffer)) {
+    return res.status(401).json({ error: 'Invalid webhook signature' });
+  }
+  // Re-parse body as JSON for downstream handlers
+  try { req.body = JSON.parse(rawBody.toString()); } catch (e) { req.body = {}; }
+  next();
+}
+
+// ─── AI Context Helpers ─────────────────────────────────────────
+const MAX_CONTEXT_CHARS = 6000;
+function truncateContext(str) {
+  if (typeof str !== 'string') str = JSON.stringify(str);
+  if (str.length <= MAX_CONTEXT_CHARS) return str;
+  return str.slice(0, MAX_CONTEXT_CHARS) + ' [truncated]';
+}
+
+// ─── Column Whitelist Cache for CRUD SQL injection prevention ────
+const TABLE_COLUMNS_CACHE = {};
+async function getAllowedColumns(table) {
+  if (TABLE_COLUMNS_CACHE[table]) return TABLE_COLUMNS_CACHE[table];
+  const result = await pool.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public'`,
+    [table]
+  );
+  const cols = result.rows.map(r => r.column_name);
+  TABLE_COLUMNS_CACHE[table] = cols;
+  return cols;
+}
+function filterBodyKeys(body, allowedCols) {
+  const blocked = ['id', 'created_at'];
+  return Object.keys(body).filter(k => allowedCols.includes(k) && !blocked.includes(k));
+}
 
 // ─── Auth Routes ────────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
@@ -459,26 +569,43 @@ app.get('/api/analytics/alerts', auth, async (req, res) => {
 const TABLES = ['users', 'properties', 'access_events', 'visitors', 'credentials', 'cameras', 'incidents', 'tenants', 'work_orders', 'zones', 'guards', 'device_events', 'devices', 'firmware_catalog', 'firmware_updates', 'network_topology', 'device_metrics', 'device_health_scores'];
 
 for (const table of TABLES) {
-  // List with search
+  // List with search + pagination
   app.get(`/api/${table}`, auth, async (req, res) => {
     try {
-      const { search, limit = 100, order = 'id DESC' } = req.query;
-      let query = `SELECT * FROM ${table}`;
+      const { search, order = 'id DESC', page, limit: limitParam } = req.query;
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.min(100, Math.max(1, parseInt(limitParam) || 20));
+      const offset = (pageNum - 1) * limitNum;
+      let whereClause = '';
       const params = [];
+
+      // Validate ORDER BY: only allow "<whitelisted_column> ASC|DESC"
+      const allowedCols = await getAllowedColumns(table);
+      let safeOrder = 'id DESC';
+      const orderMatch = /^([a-z_]+)\s+(ASC|DESC)$/i.exec(order);
+      if (orderMatch && allowedCols.includes(orderMatch[1].toLowerCase())) {
+        safeOrder = `"${orderMatch[1].toLowerCase()}" ${orderMatch[2].toUpperCase()}`;
+      }
+
       if (search) {
-        const cols = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND data_type IN ('character varying', 'text')`, [table]);
-        const conditions = cols.rows.map((c, i) => `${c.column_name}::text ILIKE $${i + 1}`);
+        const textCols = await pool.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' AND data_type IN ('character varying', 'text')`,
+          [table]
+        );
+        const conditions = textCols.rows.map((c, i) => `${c.column_name}::text ILIKE $${i + 1}`);
         if (conditions.length > 0) {
-          query += ` WHERE ${conditions.join(' OR ')}`;
-          cols.rows.forEach(() => params.push(`%${search}%`));
+          whereClause = ` WHERE ${conditions.join(' OR ')}`;
+          textCols.rows.forEach(() => params.push(`%${search}%`));
         }
       }
-      // Sanitize order to prevent SQL injection
-      const allowedOrders = /^[a-z_]+ (ASC|DESC)$/i;
-      const safeOrder = allowedOrders.test(order) ? order : 'id DESC';
-      query += ` ORDER BY ${safeOrder} LIMIT ${parseInt(limit)}`;
-      const result = await pool.query(query, params);
-      res.json(result.rows);
+
+      const countResult = await pool.query(`SELECT COUNT(*) FROM ${table}${whereClause}`, params);
+      const total = parseInt(countResult.rows[0].count);
+
+      const dataParams = [...params, limitNum, offset];
+      const query = `SELECT * FROM ${table}${whereClause} ORDER BY ${safeOrder} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      const result = await pool.query(query, dataParams);
+      res.json({ data: result.rows, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -495,14 +622,17 @@ for (const table of TABLES) {
     }
   });
 
-  // Create
+  // Create — filter keys against DB column whitelist
   app.post(`/api/${table}`, auth, async (req, res) => {
     try {
-      const keys = Object.keys(req.body).filter(k => k !== 'id' && k !== 'created_at');
+      const allowedCols = await getAllowedColumns(table);
+      const keys = filterBodyKeys(req.body, allowedCols);
+      if (keys.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
       const vals = keys.map(k => req.body[k]);
       const placeholders = keys.map((_, i) => `$${i + 1}`);
+      const quotedKeys = keys.map(k => `"${k}"`);
       const result = await pool.query(
-        `INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders.join(',')}) RETURNING *`,
+        `INSERT INTO ${table} (${quotedKeys.join(',')}) VALUES (${placeholders.join(',')}) RETURNING *`,
         vals
       );
       res.status(201).json(result.rows[0]);
@@ -511,12 +641,14 @@ for (const table of TABLES) {
     }
   });
 
-  // Update
+  // Update — filter keys against DB column whitelist
   app.put(`/api/${table}/:id`, auth, async (req, res) => {
     try {
-      const keys = Object.keys(req.body).filter(k => k !== 'id' && k !== 'created_at');
+      const allowedCols = await getAllowedColumns(table);
+      const keys = filterBodyKeys(req.body, allowedCols);
+      if (keys.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
       const vals = keys.map(k => req.body[k]);
-      const sets = keys.map((k, i) => `${k} = $${i + 1}`);
+      const sets = keys.map((k, i) => `"${k}" = $${i + 1}`);
       vals.push(req.params.id);
       const result = await pool.query(
         `UPDATE ${table} SET ${sets.join(',')} WHERE id = $${vals.length} RETURNING *`,
@@ -543,6 +675,7 @@ for (const table of TABLES) {
 
 // ─── OpenRouter AI Helper ───────────────────────────────────────
 async function callAI(messages, maxTokens = 2000) {
+  if (!AI_READY) throw new Error('AI service unavailable: OPENROUTER_API_KEY not configured.');
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -556,8 +689,16 @@ async function callAI(messages, maxTokens = 2000) {
   return data.choices[0].message.content;
 }
 
+// ─── AI wrapper that persists result to ai_results ───────────────
+async function callAIAndPersist(req, endpoint, messages, maxTokens = 2000) {
+  const text = await callAI(messages, maxTokens);
+  const parsed = parseAIJson(text);
+  await saveAIResult(req.user && req.user.id, endpoint, req.body, text, parsed);
+  return text;
+}
+
 // ─── AI Endpoint 1: SOC Copilot ─────────────────────────────────
-app.post('/api/ai/soc-copilot', auth, async (req, res) => {
+app.post('/api/ai/soc-copilot', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const { messages: userMessages } = req.body;
     const [props, incs, events, cams, gds] = await Promise.all([
@@ -587,13 +728,13 @@ Respond concisely and professionally. Use markdown formatting with headers, bull
 });
 
 // ─── AI Endpoint 2: Incident Summarizer ─────────────────────────
-app.post('/api/ai/incident-summarizer', auth, async (req, res) => {
+app.post('/api/ai/incident-summarizer', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
-    const incidents = await pool.query('SELECT * FROM incidents ORDER BY id DESC');
+    const incidents = await pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 100');
     const events = await pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 30');
     const answer = await callAI([
       { role: 'system', content: 'You are a security incident analyst for Vigilance AI. Analyze incidents and provide professional summaries with severity assessments, patterns, and recommended actions. Use markdown formatting.' },
-      { role: 'user', content: `Analyze these security incidents and related access events:\n\nIncidents:\n${JSON.stringify(incidents.rows)}\n\nRecent Access Events:\n${JSON.stringify(events.rows)}\n\n${req.body.prompt || 'Provide a comprehensive incident summary with patterns and recommendations.'}` }
+      { role: 'user', content: `Analyze these security incidents and related access events:\n\nIncidents:\n${truncateContext(JSON.stringify(incidents.rows))}\n\nRecent Access Events:\n${truncateContext(JSON.stringify(events.rows))}\n\n${req.body.prompt || 'Provide a comprehensive incident summary with patterns and recommendations.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -602,14 +743,14 @@ app.post('/api/ai/incident-summarizer', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 3: Anomaly Detection ───────────────────────────
-app.post('/api/ai/anomaly-detection', auth, async (req, res) => {
+app.post('/api/ai/anomaly-detection', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
-    const denied = await pool.query("SELECT * FROM access_events WHERE status = 'Denied'");
-    const offHours = await pool.query("SELECT * FROM access_events WHERE EXTRACT(HOUR FROM timestamp) < 6 OR EXTRACT(HOUR FROM timestamp) > 22");
-    const allEvents = await pool.query('SELECT * FROM access_events ORDER BY timestamp DESC');
+    const denied = await pool.query("SELECT * FROM access_events WHERE status = 'Denied' ORDER BY timestamp DESC LIMIT 100");
+    const offHours = await pool.query("SELECT * FROM access_events WHERE EXTRACT(HOUR FROM timestamp) < 6 OR EXTRACT(HOUR FROM timestamp) > 22 ORDER BY timestamp DESC LIMIT 100");
+    const allEvents = await pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100');
     const answer = await callAI([
       { role: 'system', content: 'You are an AI anomaly detection system for Vigilance AI. Analyze access patterns and identify anomalies. Rate each anomaly as Critical, High, Medium, or Low. Use markdown formatting with clear sections.' },
-      { role: 'user', content: `Analyze these access events for anomalies:\n\nDenied Access Events:\n${JSON.stringify(denied.rows)}\n\nOff-Hours Events:\n${JSON.stringify(offHours.rows)}\n\nAll Events:\n${JSON.stringify(allEvents.rows)}\n\n${req.body.prompt || 'Identify all anomalies and rate their severity.'}` }
+      { role: 'user', content: `Analyze these access events for anomalies:\n\nDenied Access Events:\n${truncateContext(JSON.stringify(denied.rows))}\n\nOff-Hours Events:\n${truncateContext(JSON.stringify(offHours.rows))}\n\nAll Events:\n${truncateContext(JSON.stringify(allEvents.rows))}\n\n${req.body.prompt || 'Identify all anomalies and rate their severity.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -618,13 +759,13 @@ app.post('/api/ai/anomaly-detection', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 4: Visitor Risk Assessment ─────────────────────
-app.post('/api/ai/visitor-risk', auth, async (req, res) => {
+app.post('/api/ai/visitor-risk', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
-    const visitors = await pool.query('SELECT * FROM visitors ORDER BY check_in DESC');
-    const incidents = await pool.query('SELECT property_name, severity, incident_type, title FROM incidents');
+    const visitors = await pool.query('SELECT * FROM visitors ORDER BY check_in DESC LIMIT 100');
+    const incidents = await pool.query('SELECT property_name, severity, incident_type, title FROM incidents ORDER BY id DESC LIMIT 100');
     const answer = await callAI([
       { role: 'system', content: 'You are a visitor risk assessment AI for Vigilance AI. Evaluate visitor risk based on patterns, property incident history, and visit details. Assign risk scores (1-100) and flag concerning patterns. Use markdown formatting.' },
-      { role: 'user', content: `Assess visitor risk:\n\nVisitors:\n${JSON.stringify(visitors.rows)}\n\nProperty Incidents:\n${JSON.stringify(incidents.rows)}\n\n${req.body.prompt || 'Provide risk assessment for all current visitors.'}` }
+      { role: 'user', content: `Assess visitor risk:\n\nVisitors:\n${truncateContext(JSON.stringify(visitors.rows))}\n\nProperty Incidents:\n${truncateContext(JSON.stringify(incidents.rows))}\n\n${req.body.prompt || 'Provide risk assessment for all current visitors.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -633,34 +774,34 @@ app.post('/api/ai/visitor-risk', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 5: Natural Language Reporting ──────────────────
-app.post('/api/ai/nl-reporting', auth, async (req, res) => {
+app.post('/api/ai/nl-reporting', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [props, events, visitors, creds, cams, incs, tenants, wos, zones, guards] = await Promise.all([
-      pool.query('SELECT * FROM properties'),
-      pool.query('SELECT * FROM access_events'),
-      pool.query('SELECT * FROM visitors'),
-      pool.query('SELECT * FROM credentials'),
-      pool.query('SELECT * FROM cameras'),
-      pool.query('SELECT * FROM incidents'),
-      pool.query('SELECT * FROM tenants'),
-      pool.query('SELECT * FROM work_orders'),
-      pool.query('SELECT * FROM zones'),
-      pool.query('SELECT * FROM guards'),
+      pool.query('SELECT * FROM properties LIMIT 100'),
+      pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100'),
+      pool.query('SELECT * FROM visitors ORDER BY check_in DESC LIMIT 100'),
+      pool.query('SELECT * FROM credentials ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM cameras ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM tenants ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM work_orders ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM zones ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM guards ORDER BY id DESC LIMIT 100'),
     ]);
+    const dataContext = truncateContext(JSON.stringify({
+      properties: props.rows,
+      access_events: events.rows,
+      visitors: visitors.rows,
+      credentials: creds.rows,
+      cameras: cams.rows,
+      incidents: incs.rows,
+      tenants: tenants.rows,
+      work_orders: wos.rows,
+      zones: zones.rows,
+      guards: guards.rows,
+    }));
     const answer = await callAI([
-      { role: 'system', content: `You are a natural language reporting engine for Vigilance AI. Answer questions using this data. Be precise with numbers. Use markdown tables when appropriate.
-
-Data:
-- Properties (${props.rows.length}): ${JSON.stringify(props.rows)}
-- Access Events (${events.rows.length}): ${JSON.stringify(events.rows)}
-- Visitors (${visitors.rows.length}): ${JSON.stringify(visitors.rows)}
-- Credentials (${creds.rows.length}): ${JSON.stringify(creds.rows)}
-- Cameras (${cams.rows.length}): ${JSON.stringify(cams.rows)}
-- Incidents (${incs.rows.length}): ${JSON.stringify(incs.rows)}
-- Tenants (${tenants.rows.length}): ${JSON.stringify(tenants.rows)}
-- Work Orders (${wos.rows.length}): ${JSON.stringify(wos.rows)}
-- Zones (${zones.rows.length}): ${JSON.stringify(zones.rows)}
-- Guards (${guards.rows.length}): ${JSON.stringify(guards.rows)}` },
+      { role: 'system', content: `You are a natural language reporting engine for Vigilance AI. Answer questions using this data. Be precise with numbers. Use markdown tables when appropriate.\n\nData (truncated to fit context):\n${dataContext}` },
       { role: 'user', content: req.body.prompt || 'Give me an overview of the entire security portfolio.' }
     ]);
     res.json({ response: answer });
@@ -670,18 +811,18 @@ Data:
 });
 
 // ─── AI Endpoint 6: Compliance Report ───────────────────────────
-app.post('/api/ai/compliance-report', auth, async (req, res) => {
+app.post('/api/ai/compliance-report', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [events, creds, cams, incs, zones] = await Promise.all([
-      pool.query('SELECT * FROM access_events'),
-      pool.query('SELECT * FROM credentials'),
-      pool.query('SELECT * FROM cameras'),
-      pool.query('SELECT * FROM incidents'),
-      pool.query('SELECT * FROM zones'),
+      pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100'),
+      pool.query('SELECT * FROM credentials ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM cameras ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 100'),
+      pool.query('SELECT * FROM zones ORDER BY id DESC LIMIT 100'),
     ]);
     const answer = await callAI([
       { role: 'system', content: 'You are a compliance reporting AI for Vigilance AI. Generate SOC 2 and HIPAA compliance assessments based on security data. Identify gaps and provide recommendations. Use markdown with clear sections, checkmarks for compliant items, and X marks for non-compliant items.' },
-      { role: 'user', content: `Generate a compliance report based on:\n\nAccess Events: ${JSON.stringify(events.rows)}\nCredentials: ${JSON.stringify(creds.rows)}\nCameras: ${JSON.stringify(cams.rows)}\nIncidents: ${JSON.stringify(incs.rows)}\nZones: ${JSON.stringify(zones.rows)}\n\n${req.body.prompt || 'Generate a comprehensive SOC 2 compliance report.'}` }
+      { role: 'user', content: `Generate a compliance report based on:\n\nAccess Events: ${truncateContext(JSON.stringify(events.rows))}\nCredentials: ${truncateContext(JSON.stringify(creds.rows))}\nCameras: ${truncateContext(JSON.stringify(cams.rows))}\nIncidents: ${truncateContext(JSON.stringify(incs.rows))}\nZones: ${truncateContext(JSON.stringify(zones.rows))}\n\n${req.body.prompt || 'Generate a comprehensive SOC 2 compliance report.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -690,7 +831,7 @@ app.post('/api/ai/compliance-report', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 7: Predictive Maintenance ──────────────────────
-app.post('/api/ai/predictive-maintenance', auth, async (req, res) => {
+app.post('/api/ai/predictive-maintenance', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const wos = await pool.query('SELECT * FROM work_orders ORDER BY created_at DESC');
     const cams = await pool.query('SELECT * FROM cameras');
@@ -705,30 +846,30 @@ app.post('/api/ai/predictive-maintenance', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 8: Threat Assessment ───────────────────────────
-app.post('/api/ai/threat-assessment', auth, async (req, res) => {
+app.post('/api/ai/threat-assessment', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const propertyName = req.body.property;
     let incs, cams, zones, guards, events;
     if (propertyName) {
       [incs, cams, zones, guards, events] = await Promise.all([
-        pool.query('SELECT * FROM incidents WHERE property_name = $1', [propertyName]),
-        pool.query('SELECT * FROM cameras WHERE property_name = $1', [propertyName]),
-        pool.query('SELECT * FROM zones WHERE property_name = $1', [propertyName]),
-        pool.query('SELECT * FROM guards WHERE property_name = $1', [propertyName]),
-        pool.query('SELECT * FROM access_events WHERE property_name = $1', [propertyName]),
+        pool.query('SELECT * FROM incidents WHERE property_name = $1 ORDER BY id DESC LIMIT 100', [propertyName]),
+        pool.query('SELECT * FROM cameras WHERE property_name = $1 ORDER BY id DESC LIMIT 100', [propertyName]),
+        pool.query('SELECT * FROM zones WHERE property_name = $1 ORDER BY id DESC LIMIT 100', [propertyName]),
+        pool.query('SELECT * FROM guards WHERE property_name = $1 ORDER BY id DESC LIMIT 100', [propertyName]),
+        pool.query('SELECT * FROM access_events WHERE property_name = $1 ORDER BY timestamp DESC LIMIT 100', [propertyName]),
       ]);
     } else {
       [incs, cams, zones, guards, events] = await Promise.all([
-        pool.query('SELECT * FROM incidents'),
-        pool.query('SELECT * FROM cameras'),
-        pool.query('SELECT * FROM zones'),
-        pool.query('SELECT * FROM guards'),
-        pool.query('SELECT * FROM access_events'),
+        pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 100'),
+        pool.query('SELECT * FROM cameras ORDER BY id DESC LIMIT 100'),
+        pool.query('SELECT * FROM zones ORDER BY id DESC LIMIT 100'),
+        pool.query('SELECT * FROM guards ORDER BY id DESC LIMIT 100'),
+        pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100'),
       ]);
     }
     const answer = await callAI([
       { role: 'system', content: 'You are a threat assessment AI for Vigilance AI. Evaluate security posture and provide threat scores (1-100), identify vulnerabilities, and recommend improvements. Use markdown formatting.' },
-      { role: 'user', content: `Assess threats for ${propertyName || 'all properties'}:\n\nIncidents: ${JSON.stringify(incs.rows)}\nCameras: ${JSON.stringify(cams.rows)}\nZones: ${JSON.stringify(zones.rows)}\nGuards: ${JSON.stringify(guards.rows)}\nAccess Events: ${JSON.stringify(events.rows)}\n\n${req.body.prompt || 'Provide a comprehensive threat assessment with security score.'}` }
+      { role: 'user', content: `Assess threats for ${propertyName || 'all properties'}:\n\nIncidents: ${truncateContext(JSON.stringify(incs.rows))}\nCameras: ${truncateContext(JSON.stringify(cams.rows))}\nZones: ${truncateContext(JSON.stringify(zones.rows))}\nGuards: ${truncateContext(JSON.stringify(guards.rows))}\nAccess Events: ${truncateContext(JSON.stringify(events.rows))}\n\n${req.body.prompt || 'Provide a comprehensive threat assessment with security score.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -737,12 +878,12 @@ app.post('/api/ai/threat-assessment', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 9: Access Pattern Analysis ─────────────────────
-app.post('/api/ai/access-pattern-analysis', auth, async (req, res) => {
+app.post('/api/ai/access-pattern-analysis', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
-    const events = await pool.query('SELECT * FROM access_events ORDER BY timestamp');
+    const events = await pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100');
     const answer = await callAI([
       { role: 'system', content: 'You are an access pattern analysis AI for Vigilance AI. Analyze traffic flow, peak hours, door utilization, and provide optimization recommendations. Use markdown with tables and clear sections.' },
-      { role: 'user', content: `Analyze access patterns:\n\n${JSON.stringify(events.rows)}\n\n${req.body.prompt || 'Analyze traffic flow patterns, peak hours, and provide optimization recommendations.'}` }
+      { role: 'user', content: `Analyze access patterns:\n\n${truncateContext(JSON.stringify(events.rows))}\n\n${req.body.prompt || 'Analyze traffic flow patterns, peak hours, and provide optimization recommendations.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -751,14 +892,14 @@ app.post('/api/ai/access-pattern-analysis', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 10: Smart Scheduling ───────────────────────────
-app.post('/api/ai/smart-scheduling', auth, async (req, res) => {
+app.post('/api/ai/smart-scheduling', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
-    const guards = await pool.query('SELECT * FROM guards');
-    const incidents = await pool.query('SELECT * FROM incidents');
-    const events = await pool.query('SELECT * FROM access_events');
+    const guards = await pool.query('SELECT * FROM guards ORDER BY id DESC LIMIT 100');
+    const incidents = await pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 100');
+    const events = await pool.query('SELECT * FROM access_events ORDER BY timestamp DESC LIMIT 100');
     const answer = await callAI([
       { role: 'system', content: 'You are a smart scheduling AI for Vigilance AI. Optimize guard shift assignments based on incident patterns, access volume, and risk levels. Use markdown formatting with proposed schedules.' },
-      { role: 'user', content: `Optimize guard scheduling:\n\nGuards: ${JSON.stringify(guards.rows)}\nIncidents: ${JSON.stringify(incidents.rows)}\nAccess Events: ${JSON.stringify(events.rows)}\n\n${req.body.prompt || 'Recommend optimized guard scheduling based on risk patterns.'}` }
+      { role: 'user', content: `Optimize guard scheduling:\n\nGuards: ${truncateContext(JSON.stringify(guards.rows))}\nIncidents: ${truncateContext(JSON.stringify(incidents.rows))}\nAccess Events: ${truncateContext(JSON.stringify(events.rows))}\n\n${req.body.prompt || 'Recommend optimized guard scheduling based on risk patterns.'}` }
     ]);
     res.json({ response: answer });
   } catch (err) {
@@ -767,7 +908,7 @@ app.post('/api/ai/smart-scheduling', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 11: Device Health Advisor ───────────────────────
-app.post('/api/ai/device-health-advisor', auth, async (req, res) => {
+app.post('/api/ai/device-health-advisor', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [metrics, health, devices] = await Promise.all([
       pool.query('SELECT * FROM device_metrics ORDER BY recorded_at DESC LIMIT 200'),
@@ -785,7 +926,7 @@ app.post('/api/ai/device-health-advisor', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 12: Firmware Risk Analyzer ──────────────────────
-app.post('/api/ai/firmware-risk-analyzer', auth, async (req, res) => {
+app.post('/api/ai/firmware-risk-analyzer', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [devices, catalog, updates] = await Promise.all([
       pool.query('SELECT * FROM devices ORDER BY id'),
@@ -803,7 +944,7 @@ app.post('/api/ai/firmware-risk-analyzer', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 13: Network Health Diagnostics ──────────────────
-app.post('/api/ai/network-health-diagnostics', auth, async (req, res) => {
+app.post('/api/ai/network-health-diagnostics', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [topology, devices] = await Promise.all([
       pool.query('SELECT * FROM network_topology ORDER BY property_name, subnet, id'),
@@ -820,7 +961,7 @@ app.post('/api/ai/network-health-diagnostics', auth, async (req, res) => {
 });
 
 // ─── AI Endpoint 14: Device Intelligence Copilot ─────────────────
-app.post('/api/ai/device-copilot', auth, async (req, res) => {
+app.post('/api/ai/device-copilot', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const { messages: userMessages } = req.body;
     const [devices, metrics, health, catalog, updates, topology, events] = await Promise.all([
@@ -930,7 +1071,8 @@ app.post('/api/simulator/toggle', auth, (req, res) => {
 });
 
 // ─── Webhook Endpoints ──────────────────────────────────────────
-app.post('/api/webhooks/device-event', auth, async (req, res) => {
+// These are third-party push endpoints — verified via HMAC (not JWT)
+app.post('/api/webhooks/device-event', verifyWebhookSignature, async (req, res) => {
   try {
     const { event_type, device_type, device_name, property_name, zone_name, severity, description, metadata } = req.body;
     if (!event_type || !device_type || !device_name || !property_name) return res.status(400).json({ error: 'Missing required fields: event_type, device_type, device_name, property_name' });
@@ -941,7 +1083,7 @@ app.post('/api/webhooks/device-event', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/webhooks/sensor-trigger', auth, async (req, res) => {
+app.post('/api/webhooks/sensor-trigger', verifyWebhookSignature, async (req, res) => {
   try {
     const { sensor_type, zone_name, property_name, severity, description, device_name } = req.body;
     if (!sensor_type || !zone_name || !property_name || !severity) return res.status(400).json({ error: 'Missing required fields: sensor_type, zone_name, property_name, severity' });
@@ -952,7 +1094,7 @@ app.post('/api/webhooks/sensor-trigger', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/webhooks/health-heartbeat', auth, async (req, res) => {
+app.post('/api/webhooks/health-heartbeat', verifyWebhookSignature, async (req, res) => {
   try {
     const { device_type, device_name, property_name, metric_type, metric_value } = req.body;
     if (!device_type || !device_name || !property_name || !metric_type || metric_value === undefined) return res.status(400).json({ error: 'Missing required fields: device_type, device_name, property_name, metric_type, metric_value' });
@@ -965,7 +1107,7 @@ app.post('/api/webhooks/health-heartbeat', auth, async (req, res) => {
 });
 
 // ─── AI Threat Analyzer ─────────────────────────────────────────
-app.post('/api/ai/threat-analyzer', auth, async (req, res) => {
+app.post('/api/ai/threat-analyzer', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const events = await pool.query('SELECT * FROM device_events ORDER BY created_at DESC LIMIT 20');
     const incidents = await pool.query("SELECT * FROM incidents WHERE status != 'Resolved' ORDER BY created_at DESC LIMIT 5");
@@ -981,7 +1123,7 @@ app.post('/api/ai/threat-analyzer', auth, async (req, res) => {
 });
 
 // ─── AI 16: Incident Correlation Engine ──────────────────────────
-app.post('/api/ai/incident-correlation', auth, async (req, res) => {
+app.post('/api/ai/incident-correlation', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [incidents, events, access] = await Promise.all([
       pool.query('SELECT * FROM incidents ORDER BY id DESC LIMIT 30'),
@@ -997,7 +1139,7 @@ app.post('/api/ai/incident-correlation', auth, async (req, res) => {
 });
 
 // ─── AI 17: Security Posture Scorecard ──────────────────────────
-app.post('/api/ai/security-scorecard', auth, async (req, res) => {
+app.post('/api/ai/security-scorecard', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [props, cams, incs, guards, zones, devices] = await Promise.all([
       pool.query('SELECT * FROM properties'),
@@ -1016,7 +1158,7 @@ app.post('/api/ai/security-scorecard', auth, async (req, res) => {
 });
 
 // ─── AI 18: Shift Handoff Report ─────────────────────────────────
-app.post('/api/ai/shift-handoff', auth, async (req, res) => {
+app.post('/api/ai/shift-handoff', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [incidents, events, access, guards, workOrders] = await Promise.all([
       pool.query("SELECT * FROM incidents WHERE status != 'Resolved' ORDER BY id DESC LIMIT 15"),
@@ -1034,7 +1176,7 @@ app.post('/api/ai/shift-handoff', auth, async (req, res) => {
 });
 
 // ─── AI 19: Tenant Risk Profiler ────────────────────────────────
-app.post('/api/ai/tenant-risk', auth, async (req, res) => {
+app.post('/api/ai/tenant-risk', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [tenants, incidents, access, credentials] = await Promise.all([
       pool.query('SELECT * FROM tenants'),
@@ -1051,7 +1193,7 @@ app.post('/api/ai/tenant-risk', auth, async (req, res) => {
 });
 
 // ─── AI 20: Camera Blind Spot Analyzer ──────────────────────────
-app.post('/api/ai/camera-blindspot', auth, async (req, res) => {
+app.post('/api/ai/camera-blindspot', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [cameras, zones, props, incidents] = await Promise.all([
       pool.query('SELECT * FROM cameras'),
@@ -1068,7 +1210,7 @@ app.post('/api/ai/camera-blindspot', auth, async (req, res) => {
 });
 
 // ─── AI 21: Emergency Response Planner ──────────────────────────
-app.post('/api/ai/emergency-response', auth, async (req, res) => {
+app.post('/api/ai/emergency-response', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const { scenario } = req.body;
     const [props, guards, cameras, zones] = await Promise.all([
@@ -1086,7 +1228,7 @@ app.post('/api/ai/emergency-response', auth, async (req, res) => {
 });
 
 // ─── AI 22: Work Order Optimizer ────────────────────────────────
-app.post('/api/ai/work-order-optimizer', auth, async (req, res) => {
+app.post('/api/ai/work-order-optimizer', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [workOrders, devices, healthScores] = await Promise.all([
       pool.query("SELECT * FROM work_orders WHERE status != 'Completed' ORDER BY priority DESC"),
@@ -1102,7 +1244,7 @@ app.post('/api/ai/work-order-optimizer', auth, async (req, res) => {
 });
 
 // ─── AI 23: Insider Threat Detector ─────────────────────────────
-app.post('/api/ai/insider-threat', auth, async (req, res) => {
+app.post('/api/ai/insider-threat', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [access, credentials, incidents, visitors] = await Promise.all([
       pool.query('SELECT person_name, property_name, door_name, direction, status, method, timestamp FROM access_events ORDER BY id DESC LIMIT 50'),
@@ -1119,7 +1261,7 @@ app.post('/api/ai/insider-threat', auth, async (req, res) => {
 });
 
 // ─── AI 24: Energy & Sustainability Advisor ─────────────────────
-app.post('/api/ai/energy-advisor', auth, async (req, res) => {
+app.post('/api/ai/energy-advisor', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [devices, metrics, props, cameras] = await Promise.all([
       pool.query('SELECT name, device_type, property_name, status FROM devices'),
@@ -1136,7 +1278,7 @@ app.post('/api/ai/energy-advisor', auth, async (req, res) => {
 });
 
 // ─── AI 25: Executive Security Briefing ─────────────────────────
-app.post('/api/ai/executive-briefing', auth, async (req, res) => {
+app.post('/api/ai/executive-briefing', auth, aiRateLimiter, requireAI, async (req, res) => {
   try {
     const [props, incidents, cams, guards, devices, workOrders, tenants, healthScores] = await Promise.all([
       pool.query('SELECT * FROM properties'),
@@ -1156,14 +1298,383 @@ app.post('/api/ai/executive-briefing', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── AI 26: Anomaly Severity Prediction ─────────────────────────
+app.post('/api/ai/anomaly-severity-prediction', auth, aiRateLimiter, requireAI, async (req, res) => {
+  try {
+    const { incident, anomaly, context } = req.body || {};
+    let recentIncidents = [];
+    try {
+      const r = await pool.query('SELECT id, severity, status, type, created_at FROM incidents ORDER BY created_at DESC LIMIT 50');
+      recentIncidents = r.rows;
+    } catch {}
+    const answer = await callAI([
+      { role: 'system', content: 'You are an anomaly severity scoring engine for Vigilance AI. Given a candidate incident or anomaly signal and recent incident history, return a structured severity prediction. Respond ONLY with a JSON object:\n{\n  "predicted_severity": "Critical|High|Medium|Low|Informational",\n  "severity_score": 0-100,\n  "confidence": 0-100,\n  "drivers": [string],\n  "comparable_recent_incidents": [number],\n  "false_positive_probability": 0-100,\n  "recommended_response": "page_on_call|dispatch_guard|create_work_order|investigate|monitor|dismiss",\n  "rationale": string\n}' },
+      { role: 'user', content: `Score this anomaly's severity.\n\nIncident: ${JSON.stringify(incident || null)}\nAnomaly: ${JSON.stringify(anomaly || null)}\nContext: ${JSON.stringify(context || null)}\nRecent incidents (sample): ${JSON.stringify(recentIncidents).slice(0, 4000)}` }
+    ], 1500);
+    res.json({ response: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── AI 27: Camera Health Prediction ─────────────────────────────
+app.post('/api/ai/camera-health-prediction', auth, aiRateLimiter, requireAI, async (req, res) => {
+  try {
+    const { camera_id, lookback_days } = req.body || {};
+    const days = Math.min(180, Math.max(1, parseInt(lookback_days, 10) || 30));
+    let cameras = [], metrics = [], healthScores = [];
+    try {
+      if (camera_id) {
+        const r = await pool.query('SELECT * FROM cameras WHERE id = $1', [camera_id]);
+        cameras = r.rows;
+      } else {
+        const r = await pool.query('SELECT * FROM cameras LIMIT 100');
+        cameras = r.rows;
+      }
+    } catch {}
+    try {
+      const r = await pool.query(
+        `SELECT * FROM device_metrics WHERE recorded_at > NOW() - INTERVAL '${days} days' ORDER BY recorded_at DESC LIMIT 500`
+      );
+      metrics = r.rows;
+    } catch {}
+    try {
+      const r = await pool.query(
+        `SELECT device_id, overall_score, trend, calculated_at FROM device_health_scores ORDER BY calculated_at DESC LIMIT 100`
+      );
+      healthScores = r.rows;
+    } catch {}
+    const answer = await callAI([
+      { role: 'system', content: 'You are a camera health prediction engine for Vigilance AI. From device metrics, health-score trends, and camera state, predict near-term failures. Respond ONLY with a JSON object:\n{\n  "fleet_summary": {"total": number, "at_risk_count": number, "imminent_failure_count": number},\n  "predictions": [\n    {\n      "camera_id": any,\n      "camera_name": string,\n      "predicted_failure_window_days": 1-180,\n      "failure_probability": 0-100,\n      "primary_indicators": [string],\n      "recommended_action": "replace|service|firmware_update|monitor|none",\n      "priority": "critical|high|medium|low"\n    }\n  ],\n  "fleet_recommendations": [string]\n}' },
+      { role: 'user', content: `Predict camera health.\nLookback (days): ${days}\nCameras: ${JSON.stringify(cameras).slice(0, 4000)}\nRecent device metrics (sample): ${JSON.stringify(metrics).slice(0, 4000)}\nHealth scores (sample): ${JSON.stringify(healthScores).slice(0, 2000)}` }
+    ], 2000);
+    res.json({ response: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// =================================================================
+// Apply pass 5 — full backlog
+//   AI 28: /api/ai/network-baseline-learning  (MECHANICAL — text-only LLM)
+//   AI 29: /api/ai/incident-response-plan      (MECHANICAL — text-only LLM with PRODUCT-DECISION defaults)
+//   AI 30: /api/ai/multi-site-rollup           (MECHANICAL — text-only LLM; PRODUCT-DECISION: site grouping = property.city)
+//   ── Integrations ──
+//   POST  /api/threat-intel/lookup             (NEEDS-CREDS — VIRUSTOTAL_API_KEY)
+//   POST  /api/siem/forward                    (NEEDS-CREDS — SPLUNK_HEC_URL + SPLUNK_HEC_TOKEN)
+//   GET   /api/audit-trail/compliance          (MECHANICAL — additive; CREATE TABLE IF NOT EXISTS)
+//
+// Env vars consumed:
+//   - OPENROUTER_API_KEY  (LLM — already enforced via requireAI)
+//   - VIRUSTOTAL_API_KEY  (threat intel)
+//   - SPLUNK_HEC_URL, SPLUNK_HEC_TOKEN (SIEM forwarding)
+// =================================================================
+
+// AI 28: Network Behavior Baseline Learning
+app.post('/api/ai/network-baseline-learning', auth, aiRateLimiter, requireAI, async (req, res) => {
+  try {
+    const { lookback_days } = req.body || {};
+    const days = Math.min(180, Math.max(1, parseInt(lookback_days, 10) || 30));
+    let metrics = [], events = [];
+    try { const r = await pool.query(`SELECT * FROM device_metrics WHERE recorded_at > NOW() - INTERVAL '${days} days' ORDER BY recorded_at DESC LIMIT 1000`); metrics = r.rows; } catch {}
+    try { const r = await pool.query(`SELECT id, event_type, severity, device_name, property_name, created_at FROM device_events WHERE created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 500`); events = r.rows; } catch {}
+    const answer = await callAI([
+      { role: 'system', content: 'You learn baseline network behavior from device metrics and events. Respond ONLY with JSON:\n{\n  "lookback_days": number,\n  "baseline_metrics": {"avg_uptime_percent": 0-100, "median_latency_ms": number, "p95_latency_ms": number, "typical_event_rate_per_day": number},\n  "anomaly_thresholds": [{"metric": string, "warn_above": number, "critical_above": number}],\n  "subnet_clusters": [{"cluster_id": string, "characteristics": [string]}],\n  "deviations": [{"subject": string, "deviation_score": 0-100, "indicators": [string]}],\n  "recommendations": [string]\n}' },
+      { role: 'user', content: `Learn network baseline.\nLookback (days): ${days}\nMetrics (sample): ${JSON.stringify(metrics).slice(0, 4000)}\nEvents (sample): ${JSON.stringify(events).slice(0, 3000)}` }
+    ], 2000);
+    res.json({ response: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// AI 29: Incident Response Plan generator (PRODUCT-DECISION: default playbooks for top
+// 4 categories: Unauthorized Access, Tailgating, Suspicious Package, Equipment Failure.
+// Other categories fall through to a generic "investigate-then-escalate" plan.)
+app.post('/api/ai/incident-response-plan', auth, aiRateLimiter, requireAI, async (req, res) => {
+  try {
+    const { incident_type, property_name, severity = 'Medium', extra_context } = req.body || {};
+    if (!incident_type) return res.status(400).json({ error: 'incident_type is required' });
+    let property = null;
+    try { if (property_name) { const r = await pool.query('SELECT * FROM properties WHERE name = $1 LIMIT 1', [property_name]); property = r.rows[0] || null; } } catch {}
+    const answer = await callAI([
+      { role: 'system', content: 'You generate incident response plans for a security operations platform. PRODUCT-DECISION: emit per-stage actions for triage, containment, eradication, recovery, and lessons-learned. Respond ONLY with JSON:\n{\n  "incident_type": string,\n  "severity": "Critical|High|Medium|Low",\n  "stages": [{"stage": "triage|containment|eradication|recovery|lessons_learned", "actions": [{"order": number, "action": string, "owner": string, "sla_minutes": number}]}],\n  "escalation_path": [string],\n  "communications": {"internal": [string], "external": [string]},\n  "automation_hooks": [string],\n  "kpis_to_track": [string]\n}' },
+      { role: 'user', content: `Generate response plan.\nType: ${incident_type}\nSeverity: ${severity}\nProperty: ${JSON.stringify(property)}\nExtra: ${extra_context || 'none'}` }
+    ], 2000);
+    res.json({ response: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// AI 30: Multi-site rollup
+// PRODUCT-DECISION: site grouping defaults to property.city when no explicit "region" column exists.
+app.post('/api/ai/multi-site-rollup', auth, aiRateLimiter, requireAI, async (req, res) => {
+  try {
+    const { region } = req.body || {};
+    let props = [], incidents = [], cams = [], guards = [];
+    try { const r = await pool.query(region ? 'SELECT * FROM properties WHERE city = $1' : 'SELECT * FROM properties LIMIT 200', region ? [region] : []); props = r.rows; } catch {}
+    try { const r = await pool.query('SELECT id, severity, status, incident_type, property_name, created_at FROM incidents ORDER BY created_at DESC LIMIT 200'); incidents = r.rows; } catch {}
+    try { const r = await pool.query('SELECT property_name, status FROM cameras LIMIT 1000'); cams = r.rows; } catch {}
+    try { const r = await pool.query('SELECT property_name, status FROM guards LIMIT 500'); guards = r.rows; } catch {}
+    const answer = await callAI([
+      { role: 'system', content: 'You are a regional security operations roll-up engine. PRODUCT-DECISION: groupings default to property.city. Respond ONLY with JSON:\n{\n  "grouping": "city|region|portfolio",\n  "groups": [{"name": string, "property_count": number, "open_incidents": number, "online_camera_percent": 0-100, "guard_coverage_score": 0-100, "risk_grade": "A|B|C|D|F", "top_issues": [string]}],\n  "portfolio_summary": {"total_properties": number, "total_open_incidents": number, "average_risk_grade": string},\n  "recommendations": [string]\n}' },
+      { role: 'user', content: `Multi-site rollup.\nFilter region: ${region || 'all'}\nProperties: ${JSON.stringify(props).slice(0, 3000)}\nIncidents: ${JSON.stringify(incidents).slice(0, 3000)}\nCameras (sample): ${JSON.stringify(cams).slice(0, 2000)}\nGuards (sample): ${JSON.stringify(guards).slice(0, 2000)}` }
+    ], 2500);
+    res.json({ response: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Threat-intel lookup (NEEDS-CREDS: VIRUSTOTAL_API_KEY)
+app.post('/api/threat-intel/lookup', auth, async (req, res) => {
+  try {
+    if (!process.env.VIRUSTOTAL_API_KEY) return res.status(503).json({ error: 'Threat-intel not configured', missing: 'VIRUSTOTAL_API_KEY' });
+    const { ioc_type = 'ip', value } = req.body || {};
+    if (!value) return res.status(400).json({ error: 'value required' });
+    const path = ioc_type === 'domain' ? 'domains' : ioc_type === 'hash' ? 'files' : 'ip_addresses';
+    const r = await fetch(`https://www.virustotal.com/api/v3/${path}/${encodeURIComponent(value)}`, {
+      headers: { 'x-apikey': process.env.VIRUSTOTAL_API_KEY, 'accept': 'application/json' }
+    });
+    const data = await r.json().catch(() => ({}));
+    res.status(r.ok ? 200 : 502).json({ ok: r.ok, status: r.status, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// SIEM forward (NEEDS-CREDS: SPLUNK_HEC_URL + SPLUNK_HEC_TOKEN)
+app.post('/api/siem/forward', auth, async (req, res) => {
+  try {
+    const missing = [];
+    if (!process.env.SPLUNK_HEC_URL) missing.push('SPLUNK_HEC_URL');
+    if (!process.env.SPLUNK_HEC_TOKEN) missing.push('SPLUNK_HEC_TOKEN');
+    if (missing.length) return res.status(503).json({ error: 'SIEM not configured', missing: missing.join(',') });
+    const { event, sourcetype = 'vigilance:incident' } = req.body || {};
+    if (!event) return res.status(400).json({ error: 'event payload required' });
+    const r = await fetch(process.env.SPLUNK_HEC_URL.replace(/\/$/, '') + '/services/collector/event', {
+      method: 'POST',
+      headers: { 'Authorization': `Splunk ${process.env.SPLUNK_HEC_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourcetype, event })
+    });
+    const data = await r.json().catch(() => ({}));
+    res.status(r.ok ? 200 : 502).json({ ok: r.ok, status: r.status, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Audit-trail compliance reporting (additive — idempotent table create)
+async function ensureAuditTrailTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_trail (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        action VARCHAR(120) NOT NULL,
+        entity_type VARCHAR(80),
+        entity_id INTEGER,
+        details JSONB,
+        ip_address VARCHAR(64),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+  } catch (e) { console.error('[audit_trail] create:', e.message); }
+}
+ensureAuditTrailTable();
+
+app.post('/api/audit-trail/log', auth, async (req, res) => {
+  try {
+    const { action, entity_type, entity_id, details } = req.body || {};
+    if (!action) return res.status(400).json({ error: 'action required' });
+    const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
+    await pool.query(
+      'INSERT INTO audit_trail (user_id, action, entity_type, entity_id, details, ip_address) VALUES ($1,$2,$3,$4,$5,$6)',
+      [req.user?.id || null, action, entity_type || null, entity_id || null, JSON.stringify(details || {}), ip]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/audit-trail/compliance', auth, async (req, res) => {
+  try {
+    const limit = Math.min(500, parseInt(req.query.limit, 10) || 100);
+    const r = await pool.query('SELECT id, user_id, action, entity_type, entity_id, details, ip_address, created_at FROM audit_trail ORDER BY id DESC LIMIT $1', [limit]).catch(() => ({ rows: [] }));
+    res.json({ entries: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── AI Results Persistence ──────────────────────────────────────
+async function saveAIResult(userId, endpoint, inputData, resultText, parsed) {
+  try {
+    await pool.query(
+      `INSERT INTO ai_results (user_id, endpoint, input_data, result_text, parsed_result, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [userId || null, endpoint, JSON.stringify(inputData), resultText, JSON.stringify(parsed)]
+    );
+  } catch (e) {
+    // best effort — don't fail if table doesn't exist yet
+    if (!e.message.includes('does not exist')) console.error('[ai_results]', e.message);
+  }
+}
+
+// ─── Investigation Cases ────────────────────────────────────────
+// Ensure cases table exists (idempotent — runs on each startup if DB already has table this is safe)
+async function ensureCasesTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cases (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        status VARCHAR(50) DEFAULT 'Open',
+        severity VARCHAR(20) DEFAULT 'Medium',
+        incident_ids INTEGER[] DEFAULT '{}',
+        device_event_ids INTEGER[] DEFAULT '{}',
+        ai_summary TEXT,
+        created_by VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    // Invalidate cache so CRUD whitelist picks up the new table
+    delete TABLE_COLUMNS_CACHE['cases'];
+    console.log('[cases] Table ready.');
+  } catch (e) {
+    console.error('[cases] Table creation failed:', e.message);
+  }
+}
+
+app.post('/api/cases', auth, requireAI, async (req, res) => {
+  try {
+    const { incidentIds = [], deviceEventIds = [], title, description } = req.body;
+    if (!title) return res.status(400).json({ error: 'title is required' });
+
+    // Fetch correlated events for AI summary
+    let incidents = [];
+    let deviceEvents = [];
+    if (incidentIds.length > 0) {
+      const placeholders = incidentIds.map((_, i) => `$${i + 1}`).join(',');
+      const r = await pool.query(`SELECT * FROM incidents WHERE id IN (${placeholders})`, incidentIds);
+      incidents = r.rows;
+    }
+    if (deviceEventIds.length > 0) {
+      const placeholders = deviceEventIds.map((_, i) => `$${i + 1}`).join(',');
+      const r = await pool.query(`SELECT * FROM device_events WHERE id IN (${placeholders})`, deviceEventIds);
+      deviceEvents = r.rows;
+    }
+
+    // Derive severity from worst incident severity
+    const severityRank = { Critical: 4, High: 3, Medium: 2, Low: 1 };
+    let severity = 'Medium';
+    for (const inc of incidents) {
+      if ((severityRank[inc.severity] || 0) > (severityRank[severity] || 0)) {
+        severity = inc.severity;
+      }
+    }
+
+    // Build AI summary
+    const contextText = truncateContext(JSON.stringify({
+      incidents: incidents.map(i => ({ id: i.id, title: i.title, severity: i.severity, incident_type: i.incident_type, property_name: i.property_name, status: i.status, description: i.description })),
+      device_events: deviceEvents.map(e => ({ id: e.id, event_type: e.event_type, device_name: e.device_name, property_name: e.property_name, severity: e.severity, description: e.description, created_at: e.created_at })),
+    }));
+
+    let aiSummary = null;
+    try {
+      aiSummary = await callAI([
+        { role: 'system', content: 'You are a security investigation analyst for Vigilance AI. Given a set of correlated incidents and device events, generate a concise investigation case summary. Include: key findings, timeline reconstruction, affected assets, likely threat vector, and recommended next steps. Use markdown formatting.' },
+        { role: 'user', content: `Generate an investigation case summary for case: "${title}"\n\nDescription: ${description || 'No description provided.'}\n\nCorrelated Events:\n${contextText}\n\nProvide a structured case summary with threat assessment and recommended actions.` }
+      ], 2000);
+    } catch (aiErr) {
+      console.error('[cases] AI summary generation failed:', aiErr.message);
+      aiSummary = 'AI summary unavailable — generated manually.';
+    }
+
+    // Persist the case
+    const result = await pool.query(
+      `INSERT INTO cases (title, description, status, severity, incident_ids, device_event_ids, ai_summary, created_by)
+       VALUES ($1, $2, 'Open', $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        title,
+        description || null,
+        severity,
+        incidentIds.length > 0 ? incidentIds : [],
+        deviceEventIds.length > 0 ? deviceEventIds : [],
+        aiSummary,
+        req.user.email || req.user.id,
+      ]
+    );
+
+    res.status(201).json({
+      case: result.rows[0],
+      correlated: { incidents, device_events: deviceEvents },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/cases', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM cases ORDER BY created_at DESC LIMIT 100');
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/cases/:id', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM cases WHERE id = $1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Case not found' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/cases/:id', auth, async (req, res) => {
+  try {
+    const allowedCols = ['title', 'description', 'status', 'severity', 'incident_ids', 'device_event_ids'];
+    const keys = Object.keys(req.body).filter(k => allowedCols.includes(k));
+    if (keys.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
+    const vals = keys.map(k => req.body[k]);
+    const sets = keys.map((k, i) => `"${k}" = $${i + 1}`);
+    vals.push(req.params.id);
+    const result = await pool.query(
+      `UPDATE cases SET ${sets.join(',')}, updated_at = NOW() WHERE id = $${vals.length} RETURNING *`,
+      vals
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Case not found' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Socket.IO ──────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log('SOC client connected:', socket.id);
   socket.on('disconnect', () => console.log('SOC client disconnected:', socket.id));
 });
 
+app.use('/api/threat-intel-feed', require('./routes/threatIntelFeed')); app.use('/api/anomaly-severity-prediction', require('./routes/anomalySeverityPrediction')); app.use('/api/automated-incident-response', require('./routes/automatedIncidentResponse')); app.use('/api/camera-health-prediction', require('./routes/cameraHealthPrediction')); app.use('/api/network-baseline-learning', require('./routes/networkBaselineLearning')); app.use('/api/multi-site-federation', require('./routes/multiSiteFederation'));
 // ─── Start Server ───────────────────────────────────────────────
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`Vigilance AI Backend running on http://localhost:${PORT}`);
+  // Ensure ai_results table
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_results (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        endpoint VARCHAR(255),
+        input_data JSONB,
+        result_text TEXT,
+        parsed_result JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('[ai_results] Table ready.');
+  } catch (e) { console.error('[ai_results] Table error:', e.message); }
+  await ensureCasesTable();
   loadSimCache();
 });
+
+// === Batch 08 Gaps & Frontend Mounts ===
+app.use('/api/gap-ai-coverage-is-comprehensive-for-the-domain', require('./routes/gapAiCoverageIsComprehensiveForTheDomain'));
+app.use('/api/gap-no-vision-video-frame-ml-analysis-focused-on', require('./routes/gapNoVisionVideoFrameMlAnalysisFocusedOn'));
+app.use('/api/gap-no-deep-integration-with-specific-video-analytics-platforms', require('./routes/gapNoDeepIntegrationWithSpecificVideoAnalyticsPlatforms'));
+app.use('/api/gap-no-siem-splunk-arcsight-connector', require('./routes/gapNoSiemSplunkArcsightConnector'));
+app.use('/api/gap-no-multi-site-regional-management', require('./routes/gapNoMultiSiteRegionalManagement'));
+app.use('/api/gap-no-formal-compliance-reporting-export', require('./routes/gapNoFormalComplianceReportingExport'));
+app.use('/api/gap-no-notifications-subsystem-alerts-only', require('./routes/gapNoNotificationsSubsystemAlertsOnly'));

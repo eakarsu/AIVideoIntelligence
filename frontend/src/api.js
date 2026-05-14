@@ -88,3 +88,34 @@ export async function callAI(endpoint, body) {
   if (!res.ok) throw new Error(data.error || 'AI request failed');
   return data;
 }
+
+// Apply pass 5 — backlog integrations (NEEDS-CREDS surface 503 + missing).
+export async function threatIntelLookup(ioc_type, value) {
+  const res = await fetch(`${API_BASE}/threat-intel/lookup`, {
+    method: 'POST', headers: headers(), body: JSON.stringify({ ioc_type, value }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data.error || 'Threat-intel failed') + (data.missing ? ` (missing: ${data.missing})` : ''));
+  return data;
+}
+
+export async function siemForward(event, sourcetype) {
+  const res = await fetch(`${API_BASE}/siem/forward`, {
+    method: 'POST', headers: headers(), body: JSON.stringify({ event, sourcetype }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data.error || 'SIEM forward failed') + (data.missing ? ` (missing: ${data.missing})` : ''));
+  return data;
+}
+
+export async function fetchAuditTrail(limit = 100) {
+  const res = await fetch(`${API_BASE}/audit-trail/compliance?limit=${limit}`, { headers: headers(false) });
+  if (!res.ok) throw new Error('Failed to fetch audit trail');
+  return res.json();
+}
+
+export async function logAuditTrail(entry) {
+  const res = await fetch(`${API_BASE}/audit-trail/log`, { method: 'POST', headers: headers(), body: JSON.stringify(entry) });
+  if (!res.ok) throw new Error('Failed to log audit entry');
+  return res.json();
+}
