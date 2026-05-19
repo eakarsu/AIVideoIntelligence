@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, Link, useNavigate, useLocation, Navigate } from 'react-router-dom';
-import { FaTachometerAlt, FaBrain, FaSignOutAlt, FaDesktop, FaNetworkWired, FaMicrochip, FaSitemap, FaChartLine } from 'react-icons/fa';
+import { FaTachometerAlt, FaBrain, FaSignOutAlt, FaDesktop, FaNetworkWired, FaMicrochip, FaSitemap, FaChartLine, FaVideo } from 'react-icons/fa';
 import { isAuthenticated, logout } from './api';
 import { modules, moduleGroups } from './modules';
 import Login from './pages/Login';
@@ -13,6 +13,7 @@ import DeviceRegistry from './pages/DeviceRegistry';
 import FirmwareManagement from './pages/FirmwareManagement';
 import NetworkTopology from './pages/NetworkTopology';
 import DeviceAnalytics from './pages/DeviceAnalytics';
+import CustomViewsPage from './pages/CustomViewsPage';
 // === Batch 08 Gaps & Frontend Mounts ===
 import CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith from './pages/CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith'
 import CfAnomalySeverityPredictionWithRiskScoring from './pages/CfAnomalySeverityPredictionWithRiskScoring'
@@ -116,6 +117,9 @@ function AppLayout() {
           <Link to="/analytics" className={`sidebar-link ${isActive('/analytics') ? 'active' : ''}`}>
             <FaChartLine /> Device Analytics
           </Link>
+          <Link to="/custom-views" className={`sidebar-link ${isActive('/custom-views') ? 'active' : ''}`}>
+            <FaVideo /> VideoAI Views
+          </Link>
         </div>
 
         <div className="sidebar-bottom">
@@ -157,6 +161,7 @@ function AppLayout() {
             <Route path="/firmware" element={<FirmwareManagement />} />
             <Route path="/topology" element={<NetworkTopology />} />
             <Route path="/analytics" element={<DeviceAnalytics />} />
+            <Route path="/custom-views" element={<CustomViewsPage />} />
             {/* // === Batch 08 Gaps & Frontend Mounts === */}
       <Route path="/cf-threat-intelligence-feed-integration-correlating-anomalies-with-external" element={<ProtectedRoute><CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith /></ProtectedRoute>} />
       <Route path="/cf-anomaly-severity-prediction-with-risk-scoring" element={<ProtectedRoute><CfAnomalySeverityPredictionWithRiskScoring /></ProtectedRoute>} />

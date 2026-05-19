@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+let __ipKeyGenerator;
+try { ({ ipKeyGenerator: __ipKeyGenerator } = require('express-rate-limit')); } catch { /* older versions */ }
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -44,7 +46,7 @@ app.use(express.json());
 const aiRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 20,
-  keyGenerator: (req) => (req.user && req.user.id) ? String(req.user.id) : req.ip,
+  keyGenerator: (req) => (req.user && req.user.id) ? String(req.user.id) : (typeof __ipKeyGenerator === 'function' ? __ipKeyGenerator(req) : req.ip),
   message: { error: 'AI rate limit exceeded. Max 20 requests per hour.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -1678,3 +1680,6 @@ app.use('/api/gap-no-siem-splunk-arcsight-connector', require('./routes/gapNoSie
 app.use('/api/gap-no-multi-site-regional-management', require('./routes/gapNoMultiSiteRegionalManagement'));
 app.use('/api/gap-no-formal-compliance-reporting-export', require('./routes/gapNoFormalComplianceReportingExport'));
 app.use('/api/gap-no-notifications-subsystem-alerts-only', require('./routes/gapNoNotificationsSubsystemAlertsOnly'));
+
+// === VideoAI Custom Views (mounted BEFORE 404) ===
+app.use('/api/custom-views', require('./routes/customViews'));
