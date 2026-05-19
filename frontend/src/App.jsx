@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, Link, useNavigate, useLocation, Navigate } from 'react-router-dom';
-import { FaTachometerAlt, FaBrain, FaSignOutAlt, FaDesktop, FaNetworkWired, FaMicrochip, FaSitemap, FaChartLine } from 'react-icons/fa';
+import { FaTachometerAlt, FaBrain, FaSignOutAlt, FaDesktop, FaNetworkWired, FaMicrochip, FaSitemap, FaChartLine, FaVideo } from 'react-icons/fa';
 import { isAuthenticated, logout } from './api';
 import { modules, moduleGroups } from './modules';
 import Login from './pages/Login';
@@ -13,6 +13,21 @@ import DeviceRegistry from './pages/DeviceRegistry';
 import FirmwareManagement from './pages/FirmwareManagement';
 import NetworkTopology from './pages/NetworkTopology';
 import DeviceAnalytics from './pages/DeviceAnalytics';
+import CustomViewsPage from './pages/CustomViewsPage';
+// === Batch 08 Gaps & Frontend Mounts ===
+import CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith from './pages/CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith'
+import CfAnomalySeverityPredictionWithRiskScoring from './pages/CfAnomalySeverityPredictionWithRiskScoring'
+import CfAutomatedIncidentResponseTriggeringRemediationWorkflows from './pages/CfAutomatedIncidentResponseTriggeringRemediationWorkflows'
+import CfCameraHealthPredictionForecastingDeviceFailures from './pages/CfCameraHealthPredictionForecastingDeviceFailures'
+import CfNetworkBehaviorBaselineLearningAutoDetectingDeviations from './pages/CfNetworkBehaviorBaselineLearningAutoDetectingDeviations'
+import CfMultiSiteFederationWithRegionalAggregationViews from './pages/CfMultiSiteFederationWithRegionalAggregationViews'
+import GapAiCoverageIsComprehensiveForTheDomain from './pages/GapAiCoverageIsComprehensiveForTheDomain'
+import GapNoVisionVideoFrameMlAnalysisFocused from './pages/GapNoVisionVideoFrameMlAnalysisFocused'
+import GapNoDeepIntegrationWithSpecificVideoAnalytics from './pages/GapNoDeepIntegrationWithSpecificVideoAnalytics'
+import GapNoSiemSplunkArcsightConnector from './pages/GapNoSiemSplunkArcsightConnector'
+import GapNoMultiSiteRegionalManagement from './pages/GapNoMultiSiteRegionalManagement'
+import GapNoFormalComplianceReportingExport from './pages/GapNoFormalComplianceReportingExport'
+import GapNoNotificationsSubsystemAlertsOnly from './pages/GapNoNotificationsSubsystemAlertsOnly'
 
 function ProtectedRoute({ children }) {
   if (!isAuthenticated()) return <Navigate to="/login" replace />;
@@ -102,6 +117,9 @@ function AppLayout() {
           <Link to="/analytics" className={`sidebar-link ${isActive('/analytics') ? 'active' : ''}`}>
             <FaChartLine /> Device Analytics
           </Link>
+          <Link to="/custom-views" className={`sidebar-link ${isActive('/custom-views') ? 'active' : ''}`}>
+            <FaVideo /> VideoAI Views
+          </Link>
         </div>
 
         <div className="sidebar-bottom">
@@ -143,7 +161,22 @@ function AppLayout() {
             <Route path="/firmware" element={<FirmwareManagement />} />
             <Route path="/topology" element={<NetworkTopology />} />
             <Route path="/analytics" element={<DeviceAnalytics />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/custom-views" element={<CustomViewsPage />} />
+            {/* // === Batch 08 Gaps & Frontend Mounts === */}
+      <Route path="/cf-threat-intelligence-feed-integration-correlating-anomalies-with-external" element={<ProtectedRoute><CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith /></ProtectedRoute>} />
+      <Route path="/cf-anomaly-severity-prediction-with-risk-scoring" element={<ProtectedRoute><CfAnomalySeverityPredictionWithRiskScoring /></ProtectedRoute>} />
+      <Route path="/cf-automated-incident-response-triggering-remediation-workflows" element={<ProtectedRoute><CfAutomatedIncidentResponseTriggeringRemediationWorkflows /></ProtectedRoute>} />
+      <Route path="/cf-camera-health-prediction-forecasting-device-failures" element={<ProtectedRoute><CfCameraHealthPredictionForecastingDeviceFailures /></ProtectedRoute>} />
+      <Route path="/cf-network-behavior-baseline-learning-auto-detecting-deviations" element={<ProtectedRoute><CfNetworkBehaviorBaselineLearningAutoDetectingDeviations /></ProtectedRoute>} />
+      <Route path="/cf-multi-site-federation-with-regional-aggregation-views" element={<ProtectedRoute><CfMultiSiteFederationWithRegionalAggregationViews /></ProtectedRoute>} />
+      <Route path="/gap-ai-coverage-is-comprehensive-for-the-domain" element={<ProtectedRoute><GapAiCoverageIsComprehensiveForTheDomain /></ProtectedRoute>} />
+      <Route path="/gap-no-vision-video-frame-ml-analysis-focused-on" element={<ProtectedRoute><GapNoVisionVideoFrameMlAnalysisFocused /></ProtectedRoute>} />
+      <Route path="/gap-no-deep-integration-with-specific-video-analytics-platforms" element={<ProtectedRoute><GapNoDeepIntegrationWithSpecificVideoAnalytics /></ProtectedRoute>} />
+      <Route path="/gap-no-siem-splunk-arcsight-connector" element={<ProtectedRoute><GapNoSiemSplunkArcsightConnector /></ProtectedRoute>} />
+      <Route path="/gap-no-multi-site-regional-management" element={<ProtectedRoute><GapNoMultiSiteRegionalManagement /></ProtectedRoute>} />
+      <Route path="/gap-no-formal-compliance-reporting-export" element={<ProtectedRoute><GapNoFormalComplianceReportingExport /></ProtectedRoute>} />
+      <Route path="/gap-no-notifications-subsystem-alerts-only" element={<ProtectedRoute><GapNoNotificationsSubsystemAlertsOnly /></ProtectedRoute>} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </div>
       </main>
