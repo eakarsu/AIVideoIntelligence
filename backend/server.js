@@ -55,7 +55,7 @@ const aiRateLimiter = rateLimit({
 const PORT = process.env.BACKEND_PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = 'anthropic/claude-3-5-sonnet-20241022';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 
 // ─── parseAIJson ─────────────────────────────────────────────────
 function parseAIJson(text) {

@@ -14,6 +14,9 @@ import FirmwareManagement from './pages/FirmwareManagement';
 import NetworkTopology from './pages/NetworkTopology';
 import DeviceAnalytics from './pages/DeviceAnalytics';
 import CustomViewsPage from './pages/CustomViewsPage';
+import CodexCustomVizFeature from './pages/CodexCustomVizFeature';
+import CodexOperationsFeature from './pages/CodexOperationsFeature';
+
 // === Batch 08 Gaps & Frontend Mounts ===
 import CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith from './pages/CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith'
 import CfAnomalySeverityPredictionWithRiskScoring from './pages/CfAnomalySeverityPredictionWithRiskScoring'
@@ -152,6 +155,9 @@ function AppLayout() {
         </div>
         <div className="page-content">
           <Routes>
+        <Route path="/codex/custom-viz" element={<ProtectedRoute><CodexCustomVizFeature /></ProtectedRoute>} />
+        <Route path="/codex/operations" element={<ProtectedRoute><CodexOperationsFeature /></ProtectedRoute>} />
+
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/module/:name" element={<ModulePage />} />
             <Route path="/module/:name/:id" element={<DetailPage />} />
