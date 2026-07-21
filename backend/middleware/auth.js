@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { jwtSecret } = require('../config/security');
 
 module.exports = function auth(req, res, next) {
   const header = req.headers.authorization;
@@ -6,7 +7,7 @@ module.exports = function auth(req, res, next) {
 
   const token = header.startsWith('Bearer ') ? header.slice(7) : header;
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'video-intelligence-jwt-secret-2024');
+    const decoded = jwt.verify(token, jwtSecret);
     req.user = decoded;
     next();
   } catch (err) {

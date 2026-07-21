@@ -1,6 +1,7 @@
 const pool = require('./db');
 const bcrypt = require('bcryptjs');
 
+if(process.env.ALLOW_DESTRUCTIVE_DEMO_SEED!=='true'){console.error('Refusing destructive demo seed; set ALLOW_DESTRUCTIVE_DEMO_SEED=true only for an isolated disposable database.');process.exit(2);}
 async function seed() {
   const client = await pool.connect();
   try {
@@ -34,11 +35,18 @@ async function seed() {
         password VARCHAR(255) NOT NULL,
         full_name VARCHAR(255) NOT NULL,
         role VARCHAR(50) DEFAULT 'admin',
+        tenant_id TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    const hash = await bcrypt.hash('password123', 10);
-    await client.query(`INSERT INTO users (email, password, full_name, role) VALUES ($1, $2, $3, $4)`, ['admin@vigilance.ai', hash, 'Admin User', 'admin']);
+    const demoEmail = process.env.SEED_ADMIN_EMAIL || process.env.DEMO_EMAIL;
+    const demoPassword = process.env.SEED_ADMIN_PASSWORD || process.env.DEMO_PASSWORD;
+    const tenantId = process.env.SEED_TENANT_ID || process.env.GOVERNANCE_TENANT_ID;
+    if (!demoEmail || !demoPassword || demoPassword.length < 12 || !tenantId) {
+      throw new Error('SEED_ADMIN_EMAIL, a 12+ character SEED_ADMIN_PASSWORD, and SEED_TENANT_ID are required');
+    }
+    const hash = await bcrypt.hash(demoPassword, 12);
+    await client.query(`INSERT INTO users (email, password, full_name, role, tenant_id) VALUES ($1, $2, $3, $4, $5)`, [demoEmail, hash, 'Admin User', 'admin', tenantId]);
 
     // Properties
     await client.query(`

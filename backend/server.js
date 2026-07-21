@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('./db');
 const auth = require('./middleware/auth');
+const { jwtSecret } = require('./config/security');
 const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config({ path: __dirname + '/../.env' });
@@ -52,8 +53,8 @@ const aiRateLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-const PORT = process.env.BACKEND_PORT || 4000;
-const JWT_SECRET = process.env.JWT_SECRET;
+const PORT = process.env.BACKEND_PORT || process.env.PORT || 4000;
+const JWT_SECRET = jwtSecret;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 
@@ -79,11 +80,7 @@ function requireAI(req, res, next) {
 // ─── Webhook HMAC Verification ──────────────────────────────────
 function verifyWebhookSignature(req, res, next) {
   if (!WEBHOOK_SECRET) {
-    // If no secret configured, skip verification but warn
-    console.warn('[WEBHOOK] WEBHOOK_SECRET not set — skipping HMAC verification');
-    // Re-parse body as JSON since express.raw was used
-    try { req.body = JSON.parse(req.body.toString()); } catch (e) { req.body = {}; }
-    return next();
+    return res.status(503).json({ error: 'webhook verification is not configured' });
   }
   const signature = req.headers['x-signature-256'];
   if (!signature) {
@@ -140,7 +137,8 @@ app.post('/api/auth/login', async (req, res) => {
     const user = result.rows[0];
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, full_name: user.full_name }, JWT_SECRET, { expiresIn: '24h' });
+    if (!user.tenant_id) return res.status(403).json({ error: 'account has no tenant assignment' });
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, full_name: user.full_name, tenantId: user.tenant_id, subjectId: String(user.id) }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role } });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -149,12 +147,16 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', auth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email, full_name, role FROM users WHERE id = $1', [req.user.id]);
+    const result = await pool.query('SELECT id, email, full_name, role, tenant_id FROM users WHERE id = $1', [req.user.id]);
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.get('/api/health', (_req,res)=>res.json({status:'ok',timestamp:new Date().toISOString()}));
+app.use('/api/evidence-workflow', auth, require('./routes/evidenceWorkflow'));
+app.use(/^\/api\/(?:gap-|ai(?:\/|-)|webhooks?(?:\/|$)|threat-intel(?:-feed|\/|$)|siem(?:\/|$)|anomaly-severity-prediction|automated-incident-response|camera-health-prediction|network-baseline-learning|multi-site-federation|devices\/[^/]+\/command)/, auth, (_req,res)=>res.status(503).json({error:'generated/direct-provider endpoint quarantined; use evidence-workflow deliveries'}));
 
 // ─── Dashboard Stats ────────────────────────────────────────────
 app.get('/api/dashboard/stats', auth, async (req, res) => {
@@ -1360,7 +1362,7 @@ app.post('/api/ai/camera-health-prediction', auth, aiRateLimiter, requireAI, asy
 //   ── Integrations ──
 //   POST  /api/threat-intel/lookup             (NEEDS-CREDS — VIRUSTOTAL_API_KEY)
 //   POST  /api/siem/forward                    (NEEDS-CREDS — SPLUNK_HEC_URL + SPLUNK_HEC_TOKEN)
-//   GET   /api/audit-trail/compliance          (MECHANICAL — additive; CREATE TABLE IF NOT EXISTS)
+//   GET   /api/audit-trail/compliance          (schema is provisioned by an explicit migration)
 //
 // Env vars consumed:
 //   - OPENROUTER_API_KEY  (LLM — already enforced via requireAI)
@@ -1457,33 +1459,14 @@ app.post('/api/siem/forward', auth, async (req, res) => {
   }
 });
 
-// Audit-trail compliance reporting (additive — idempotent table create)
-async function ensureAuditTrailTable() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS audit_trail (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER,
-        action VARCHAR(120) NOT NULL,
-        entity_type VARCHAR(80),
-        entity_id INTEGER,
-        details JSONB,
-        ip_address VARCHAR(64),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-  } catch (e) { console.error('[audit_trail] create:', e.message); }
-}
-ensureAuditTrailTable();
-
 app.post('/api/audit-trail/log', auth, async (req, res) => {
   try {
     const { action, entity_type, entity_id, details } = req.body || {};
     if (!action) return res.status(400).json({ error: 'action required' });
     const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
     await pool.query(
-      'INSERT INTO audit_trail (user_id, action, entity_type, entity_id, details, ip_address) VALUES ($1,$2,$3,$4,$5,$6)',
-      [req.user?.id || null, action, entity_type || null, entity_id || null, JSON.stringify(details || {}), ip]
+      'INSERT INTO audit_trail (tenant_id, user_id, action, entity_type, entity_id, details, ip_address) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [req.user.tenantId, req.user?.id || null, action, entity_type || null, entity_id || null, JSON.stringify(details || {}), ip]
     );
     res.json({ success: true });
   } catch (err) {
@@ -1494,7 +1477,7 @@ app.post('/api/audit-trail/log', auth, async (req, res) => {
 app.get('/api/audit-trail/compliance', auth, async (req, res) => {
   try {
     const limit = Math.min(500, parseInt(req.query.limit, 10) || 100);
-    const r = await pool.query('SELECT id, user_id, action, entity_type, entity_id, details, ip_address, created_at FROM audit_trail ORDER BY id DESC LIMIT $1', [limit]).catch(() => ({ rows: [] }));
+    const r = await pool.query('SELECT id, user_id, action, entity_type, entity_id, details, ip_address, created_at FROM audit_trail WHERE tenant_id=$1 ORDER BY id DESC LIMIT $2', [req.user.tenantId,limit]).catch(() => ({ rows: [] }));
     res.json({ entries: r.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1516,32 +1499,6 @@ async function saveAIResult(userId, endpoint, inputData, resultText, parsed) {
 }
 
 // ─── Investigation Cases ────────────────────────────────────────
-// Ensure cases table exists (idempotent — runs on each startup if DB already has table this is safe)
-async function ensureCasesTable() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS cases (
-        id SERIAL PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        description TEXT,
-        status VARCHAR(50) DEFAULT 'Open',
-        severity VARCHAR(20) DEFAULT 'Medium',
-        incident_ids INTEGER[] DEFAULT '{}',
-        device_event_ids INTEGER[] DEFAULT '{}',
-        ai_summary TEXT,
-        created_by VARCHAR(255),
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    // Invalidate cache so CRUD whitelist picks up the new table
-    delete TABLE_COLUMNS_CACHE['cases'];
-    console.log('[cases] Table ready.');
-  } catch (e) {
-    console.error('[cases] Table creation failed:', e.message);
-  }
-}
-
 app.post('/api/cases', auth, requireAI, async (req, res) => {
   try {
     const { incidentIds = [], deviceEventIds = [], title, description } = req.body;
@@ -1644,34 +1601,13 @@ app.put('/api/cases/:id', auth, async (req, res) => {
 });
 
 // ─── Socket.IO ──────────────────────────────────────────────────
+io.use((socket,next)=>{try{const raw=socket.handshake.auth?.token||socket.handshake.headers.authorization?.replace('Bearer ','');if(!raw)return next(new Error('authentication required'));const user=jwt.verify(raw,JWT_SECRET);if(!user.tenantId)return next(new Error('tenant assignment required'));socket.user=user;next();}catch{return next(new Error('invalid token'));}});
 io.on('connection', (socket) => {
   console.log('SOC client connected:', socket.id);
   socket.on('disconnect', () => console.log('SOC client disconnected:', socket.id));
 });
 
 app.use('/api/threat-intel-feed', require('./routes/threatIntelFeed')); app.use('/api/anomaly-severity-prediction', require('./routes/anomalySeverityPrediction')); app.use('/api/automated-incident-response', require('./routes/automatedIncidentResponse')); app.use('/api/camera-health-prediction', require('./routes/cameraHealthPrediction')); app.use('/api/network-baseline-learning', require('./routes/networkBaselineLearning')); app.use('/api/multi-site-federation', require('./routes/multiSiteFederation'));
-// ─── Start Server ───────────────────────────────────────────────
-server.listen(PORT, async () => {
-  console.log(`Vigilance AI Backend running on http://localhost:${PORT}`);
-  // Ensure ai_results table
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS ai_results (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER,
-        endpoint VARCHAR(255),
-        input_data JSONB,
-        result_text TEXT,
-        parsed_result JSONB,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    console.log('[ai_results] Table ready.');
-  } catch (e) { console.error('[ai_results] Table error:', e.message); }
-  await ensureCasesTable();
-  loadSimCache();
-});
-
 // === Batch 08 Gaps & Frontend Mounts ===
 app.use('/api/gap-ai-coverage-is-comprehensive-for-the-domain', require('./routes/gapAiCoverageIsComprehensiveForTheDomain'));
 app.use('/api/gap-no-vision-video-frame-ml-analysis-focused-on', require('./routes/gapNoVisionVideoFrameMlAnalysisFocusedOn'));
@@ -1683,3 +1619,5 @@ app.use('/api/gap-no-notifications-subsystem-alerts-only', require('./routes/gap
 
 // === VideoAI Custom Views (mounted BEFORE 404) ===
 app.use('/api/custom-views', require('./routes/customViews'));
+
+async function start(){try{const ready=await pool.query("SELECT to_regclass('public.evidence_workflows') AS workflow, to_regclass('public.evidence_workflow_audit') AS audit");if(!ready.rows[0].workflow||!ready.rows[0].audit)throw new Error('database migrations are pending; run npm run migrate');await loadSimCache();server.listen(PORT,()=>console.log(`Vigilance AI Backend running on http://localhost:${PORT}`));}catch(e){console.error('[startup] schema readiness failed:',e.message);process.exit(1);}}start();
