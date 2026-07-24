@@ -2,6 +2,9 @@
 set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$project_dir/.env" ]] || { echo 'Missing .env; copy .env.example and provide real secrets.' >&2; exit 1; }
+set -a
+source "$project_dir/.env"
+set +a
 [[ -d "$project_dir/backend/node_modules" && -d "$project_dir/frontend/node_modules" ]] || { echo 'Dependencies are missing; install them explicitly before starting.' >&2; exit 1; }
 backend_port="${BACKEND_PORT:-${PORT:-4000}}"
 frontend_port="${FRONTEND_PORT:-3000}"
