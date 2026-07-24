@@ -30,8 +30,8 @@ export default function Login() {
   };
 
   const handleDemo = () => {
-    setEmail('admin@vigilance.ai');
-    setPassword('password123');
+    setEmail(import.meta.env.VITE_DEMO_EMAIL || '');
+    setPassword(import.meta.env.VITE_DEMO_PASSWORD || '');
   };
 
   return (
