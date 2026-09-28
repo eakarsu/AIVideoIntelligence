@@ -73,7 +73,7 @@ export default function Login() {
 
         <div className="login-demo">
           <button type="button" className="btn btn-accent btn-full" onClick={handleDemo}>
-            Quick Demo Login
+            Auto Fill Demo Credentials
           </button>
         </div>
       </div>
