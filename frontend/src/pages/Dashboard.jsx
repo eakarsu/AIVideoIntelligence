@@ -15,7 +15,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchDashboard().then(setStats).catch(console.error).finally(() => setLoading(false));
-    fetchList('device_events').then(d => setRecentEvents(Array.isArray(d) ? d.slice(0, 5) : [])).catch(() => {});
+    fetchList('device_events').then(d => setRecentEvents(Array.isArray(d) ? d.slice(0, 15) : [])).catch(() => {});
   }, []);
 
   if (loading) return <div className="loading"><div className="spinner" />Loading dashboard...</div>;

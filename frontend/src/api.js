@@ -40,7 +40,8 @@ export async function fetchList(table, search = '') {
   const params = search ? `?search=${encodeURIComponent(search)}` : '';
   const res = await fetch(`${API_BASE}/${table}${params}`, { headers: headers(false) });
   if (!res.ok) throw new Error('Failed to fetch list');
-  return res.json();
+  const payload = await res.json();
+  return Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
 }
 
 export async function fetchOne(table, id) {

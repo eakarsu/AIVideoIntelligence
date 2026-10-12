@@ -156,6 +156,14 @@ app.get('/api/auth/me', auth, async (req, res) => {
 
 app.get('/api/health', (_req,res)=>res.json({status:'ok',timestamp:new Date().toISOString()}));
 app.use('/api/evidence-workflow', auth, require('./routes/evidenceWorkflow'));
+
+// Advisory AI reports only; native execution and approval routes stay unchanged.
+const aiWorkspaceSupport = require("./aiWorkspaceAdapters.cjs");
+const aiWorkspaceDatabase = require("./db.js");
+app.use('/api/report-workspace', require("./aiWorkspace.cjs").createAIWorkspaceRouter({
+  pool: aiWorkspaceDatabase, authenticateToken: require("./middleware/auth.js"),
+  aiRateLimiter: aiWorkspaceSupport.createWorkspaceLimiter(), features: require("./aiWorkspaceFeatures.json"),
+}));
 app.use(/^\/api\/(?:gap-|ai(?:\/|-)|webhooks?(?:\/|$)|threat-intel(?:-feed|\/|$)|siem(?:\/|$)|anomaly-severity-prediction|automated-incident-response|camera-health-prediction|network-baseline-learning|multi-site-federation|devices\/[^/]+\/command)/, auth, (_req,res)=>res.status(503).json({error:'generated/direct-provider endpoint quarantined; use evidence-workflow deliveries'}));
 
 // ─── Dashboard Stats ────────────────────────────────────────────

@@ -34,7 +34,7 @@ export default function DeviceRegistry() {
     setLoading(true);
     try {
       const data = await request(`${API}/devices?limit=200`);
-      setDevices(Array.isArray(data) ? data : []);
+      setDevices(Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : []);
     } catch { setDevices([]); }
     setLoading(false);
   }, []);
@@ -44,7 +44,7 @@ export default function DeviceRegistry() {
   const loadDeviceEvents = async (deviceName) => {
     try {
       const data = await request(`${API}/device_events?search=${encodeURIComponent(deviceName)}&limit=5`);
-      setDeviceEvents(Array.isArray(data) ? data : []);
+      setDeviceEvents(Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : []);
     } catch { setDeviceEvents([]); }
   };
 

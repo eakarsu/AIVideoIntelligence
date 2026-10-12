@@ -1,35 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { callAI } from '../api';
 import { aiFeatures } from '../modules';
-
-function parseMarkdown(text) {
-  if (!text) return '';
-  let html = text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>')
-    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br/>');
-  // Handle table-like output
-  html = html.replace(/\|(.+)\|/g, (match) => {
-    const cells = match.split('|').filter(c => c.trim());
-    if (cells.every(c => /^[\s-:]+$/.test(c))) return '';
-    const tag = cells.length > 0 ? 'td' : 'td';
-    return '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
-  });
-  return html;
-}
-
-function AIResult({ text }) {
-  if (!text) return null;
-  return <div className="ai-result" dangerouslySetInnerHTML={{ __html: parseMarkdown(text) }} />;
-}
+import AIReport from '../components/AIReport';
 
 function ChatInterface({ feature }) {
   const [messages, setMessages] = useState([]);
@@ -48,7 +20,7 @@ function ChatInterface({ feature }) {
     setLoading(true);
     try {
       const data = await callAI(feature.key, { messages: newMsgs });
-      setMessages([...newMsgs, { role: 'assistant', content: data.response }]);
+      setMessages([...newMsgs, { role: 'assistant', content: data.response ?? data.result ?? data }]);
     } catch (err) {
       setMessages([...newMsgs, { role: 'assistant', content: `Error: ${err.message}` }]);
     } finally {
@@ -65,14 +37,14 @@ function ChatInterface({ feature }) {
             <p>{feature.description}</p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginTop: 16 }}>
               {feature.samples.map(s => (
-                <button key={s} className="chip" onClick={() => send(s)}>{s}</button>
+                <button key={s} className="chip" type="button" onClick={() => setInput(s)}>{s}</button>
               ))}
             </div>
           </div>
         )}
         {messages.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
-            {m.role === 'assistant' ? <AIResult text={m.content} /> : m.content}
+            {m.role === 'assistant' ? <AIReport response={m.content} title={feature.name} /> : m.content}
           </div>
         ))}
         {loading && <div className="chat-msg assistant"><div className="spinner" style={{ width: 18, height: 18 }} /></div>}
@@ -103,7 +75,7 @@ function NLInput({ feature, onResult, setActiveLoading }) {
     try {
       const body = feature.key === 'emergency-response' ? { scenario: q } : { prompt: q };
       const data = await callAI(feature.key, body);
-      onResult(data.response);
+      onResult(data.response ?? data.result ?? data);
     } catch (err) {
       onResult(`Error: ${err.message}`);
     } finally {
@@ -130,7 +102,7 @@ function NLInput({ feature, onResult, setActiveLoading }) {
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {feature.samples.map(s => (
-          <button key={s} className="chip" onClick={() => ask(s)}>{s}</button>
+          <button key={s} className="chip" type="button" onClick={() => setInput(s)}>{s}</button>
         ))}
       </div>
     </div>
@@ -141,10 +113,12 @@ export default function AIInsights() {
   const [activeFeature, setActiveFeature] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [analysisPrompt, setAnalysisPrompt] = useState('');
 
   const openFeature = (feature) => {
     setActiveFeature(feature);
     setResult(null);
+    setAnalysisPrompt('');
     setLoading(false);
   };
 
@@ -156,7 +130,7 @@ export default function AIInsights() {
       const body = { prompt };
       if (activeFeature.key === 'emergency-response') body.scenario = prompt;
       const data = await callAI(activeFeature.key, body);
-      setResult(data.response);
+      setResult(data.response ?? data.result ?? data);
     } catch (err) {
       setResult(`Error: ${err.message}`);
     } finally {
@@ -210,31 +184,35 @@ export default function AIInsights() {
                 <>
                   <NLInput feature={activeFeature} onResult={setResult} setActiveLoading={setLoading} />
                   {loading && <div className="loading" style={{ marginTop: 20 }}><div className="spinner" />Analyzing...</div>}
-                  {result && <div style={{ marginTop: 20 }}><AIResult text={result} /></div>}
+                  {result !== null && <div style={{ marginTop: 20 }}><AIReport response={result} title={activeFeature.name} /></div>}
                 </>
               ) : (
                 <>
-                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 10 }}>Click a sample prompt to run the analysis:</div>
+                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 10 }}>Choose a sample prompt, review it, then run the analysis:</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
                     {activeFeature.samples.map(s => (
                       <button
                         key={s}
                         className="chip"
                         style={{ fontSize: 13, padding: '6px 14px' }}
-                        onClick={() => runAnalysis(s)}
+                        onClick={() => setAnalysisPrompt(s)}
                         disabled={loading}
                       >
                         {s}
                       </button>
                     ))}
                   </div>
-                  {!loading && !result && (
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                    <textarea aria-label="Analysis prompt" className="search-input" style={{ flex: 1 }} value={analysisPrompt} onChange={e => setAnalysisPrompt(e.target.value)} rows={3} />
+                    <button type="button" className="btn btn-primary" onClick={() => runAnalysis(analysisPrompt)} disabled={loading || !analysisPrompt.trim()}>Run analysis</button>
+                  </div>
+                  {!loading && result === null && (
                     <div style={{ textAlign: 'center', padding: '2rem', color: '#64748b', fontSize: 14 }}>
-                      Select a prompt above to analyze your security data with AI
+                      Select a prompt above, then run the analysis
                     </div>
                   )}
                   {loading && <div className="loading"><div className="spinner" />Analyzing data with AI...</div>}
-                  {result && <AIResult text={result} />}
+                  {result !== null && <AIReport response={result} title={activeFeature.name} />}
                 </>
               )}
             </div>

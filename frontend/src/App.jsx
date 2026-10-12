@@ -1,3 +1,4 @@
+import AIReportLibrary from "./components/AIReportLibrary";
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, Link, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { FaTachometerAlt, FaBrain, FaSignOutAlt, FaDesktop, FaNetworkWired, FaMicrochip, FaSitemap, FaChartLine, FaVideo } from 'react-icons/fa';
@@ -130,7 +131,7 @@ function AppLayout() {
             <FaSignOutAlt /> Sign Out
           </button>
         </div>
-      </aside>
+      <AIReportLibrary /></aside>
 
       <main className="main-content">
         <div className="topbar">

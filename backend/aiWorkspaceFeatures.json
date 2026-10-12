@@ -1,0 +1,93 @@
+[
+  {
+    "name": "CfAnomalySeverityPredictionWithRiskScoring",
+    "id": "cf-anomaly-severity-prediction-with-risk-scoring/history",
+    "title": "Anomaly severity prediction with risk scoring",
+    "description": "Prepare a professional advisory report for anomaly severity prediction with risk scoring using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "CfAutomatedIncidentResponseTriggeringRemediationWorkflows",
+    "id": "cf-automated-incident-response-triggering-remediation-workflows/history",
+    "title": "Automated incident response triggering remediation workflows",
+    "description": "Prepare a professional advisory report for automated incident response triggering remediation workflows using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "CfCameraHealthPredictionForecastingDeviceFailures",
+    "id": "cf-camera-health-prediction-forecasting-device-failures/history",
+    "title": "Camera health prediction forecasting device failures",
+    "description": "Prepare a professional advisory report for camera health prediction forecasting device failures using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "CfMultiSiteFederationWithRegionalAggregationViews",
+    "id": "cf-multi-site-federation-with-regional-aggregation-views/history",
+    "title": "Multi-site federation with regional aggregation views",
+    "description": "Prepare a professional advisory report for multi-site federation with regional aggregation views using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "CfNetworkBehaviorBaselineLearningAutoDetectingDeviations",
+    "id": "cf-network-behavior-baseline-learning-auto-detecting-deviations/history",
+    "title": "Network behavior baseline learning auto-detecting deviations",
+    "description": "Prepare a professional advisory report for network behavior baseline learning auto-detecting deviations using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "CfThreatIntelligenceFeedIntegrationCorrelatingAnomaliesWith",
+    "id": "cf-threat-intelligence-feed-integration-correlating-anomalies-with-external/history",
+    "title": "Threat intelligence feed integration correlating anomalies with external IOCs",
+    "description": "Prepare a professional advisory report for threat intelligence feed integration correlating anomalies with external iocs using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapAiCoverageIsComprehensiveForTheDomain",
+    "id": "gap-ai-coverage-is-comprehensive-for-the-domain/history",
+    "title": "AI coverage is comprehensive for the domain",
+    "description": "Prepare a professional advisory report for ai coverage is comprehensive for the domain using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoDeepIntegrationWithSpecificVideoAnalytics",
+    "id": "gap-no-deep-integration-with-specific-video-analytics-platforms/history",
+    "title": "No deep integration with specific video analytics platforms (Axis, Hanwha) beyond generic integration layer",
+    "description": "Prepare a professional advisory report for no deep integration with specific video analytics platforms (axis, hanwha) beyond generic integration layer using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoFormalComplianceReportingExport",
+    "id": "gap-no-formal-compliance-reporting-export/history",
+    "title": "No formal compliance reporting export",
+    "description": "Prepare a professional advisory report for no formal compliance reporting export using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoMultiSiteRegionalManagement",
+    "id": "gap-no-multi-site-regional-management/history",
+    "title": "No multi-site/regional management",
+    "description": "Prepare a professional advisory report for no multi-site/regional management using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoNotificationsSubsystemAlertsOnly",
+    "id": "gap-no-notifications-subsystem-alerts-only/history",
+    "title": "No notifications subsystem (alerts only)",
+    "description": "Prepare a professional advisory report for no notifications subsystem (alerts only) using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoSiemSplunkArcsightConnector",
+    "id": "gap-no-siem-splunk-arcsight-connector/history",
+    "title": "No SIEM (Splunk, ArcSight) connector",
+    "description": "Prepare a professional advisory report for no siem (splunk, arcsight) connector using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  },
+  {
+    "name": "GapNoVisionVideoFrameMlAnalysisFocused",
+    "id": "gap-no-vision-video-frame-ml-analysis-focused-on/history",
+    "title": "No vision/video frame ML analysis (focused on metadata, not pixels)",
+    "description": "Prepare a professional advisory report for no vision/video frame ml analysis (focused on metadata, not pixels) using the brief and evidence you provide. Review the findings, assumptions, and action plan before applying changes.",
+    "samples": []
+  }
+]

@@ -29,9 +29,16 @@ export default function Login() {
     }
   };
 
+  const demoEmail = import.meta.env.VITE_DEMO_EMAIL;
+  const demoPassword = import.meta.env.VITE_DEMO_PASSWORD;
   const handleDemo = () => {
-    setEmail(import.meta.env.VITE_DEMO_EMAIL || '');
-    setPassword(import.meta.env.VITE_DEMO_PASSWORD || '');
+    if (!demoEmail || !demoPassword) {
+      setError('Demo credentials are not configured. Ask an administrator for access.');
+      return;
+    }
+    setError('');
+    setEmail(demoEmail);
+    setPassword(demoPassword);
   };
 
   return (
@@ -73,7 +80,7 @@ export default function Login() {
 
         <div className="login-demo">
           <button type="button" className="btn btn-accent btn-full" onClick={handleDemo}>
-            Auto Fill Demo Credentials
+            Fill demo credentials
           </button>
         </div>
       </div>

@@ -110,8 +110,8 @@ export default function FirmwareManagement() {
         compRes.json(), devRes.json(), updRes.json(),
       ]);
       setCompliance(compData);
-      setDevices(devData.devices || []);
-      setUpdates(Array.isArray(updData) ? updData : updData.data || []);
+      setDevices(Array.isArray(devData.devices) ? devData.devices : []);
+      setUpdates(Array.isArray(updData) ? updData : Array.isArray(updData?.data) ? updData.data : []);
       setError(null);
     } catch (err) {
       setError(err.message);

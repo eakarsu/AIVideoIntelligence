@@ -91,7 +91,7 @@ export default function DeviceAnalytics() {
       fetch('/api/devices?limit=100', { headers: authHeaders() }).then(r => r.json()),
     ]).then(([ov, devs]) => {
       setOverview(ov);
-      setAllDevices(Array.isArray(devs) ? devs : []);
+      setAllDevices(Array.isArray(devs) ? devs : Array.isArray(devs?.data) ? devs.data : []);
       setLoadingOverview(false);
     }).catch(() => setLoadingOverview(false));
   }, []);

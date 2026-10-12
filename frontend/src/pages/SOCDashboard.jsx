@@ -1,3 +1,4 @@
+import AIReport from '../components/AIReport';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -138,8 +139,7 @@ export default function SOCDashboard() {
         return;
       }
       const data = await res.json();
-      const text = data.response || data.result || JSON.stringify(data).slice(0, 500);
-      setAnalysis(text || 'DEBUG: Response was empty. Keys: ' + Object.keys(data).join(', '));
+      setAnalysis(data.response ?? data.result ?? data);
     } catch (e) {
       setAnalysis('DEBUG ERROR: ' + e.message);
     }
@@ -236,7 +236,7 @@ export default function SOCDashboard() {
         <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #e0e3e7', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', padding: '14px 20px', maxHeight: 520, overflowY: 'auto' }}>
           <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 700, margin: '0 0 14px 0' }}><FaVideo /> Camera Grid</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            {cameras.slice(0, 6).map(cam => (
+            {cameras.slice(0, 15).map(cam => (
               <div key={cam.id} onClick={() => navigate(`/module/cameras/${cam.id}`)} style={{ border: `1px solid ${flashCam === cam.name ? '#E76500' : '#e0e3e7'}`, borderRadius: 8, cursor: 'pointer', overflow: 'hidden', transition: 'all 0.3s', boxShadow: flashCam === cam.name ? '0 0 12px rgba(231,101,0,0.3)' : 'none' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: '#f8f9fa', borderBottom: '1px solid #f0f2f5' }}>
                   <span style={{ fontSize: 12, fontWeight: 700, color: '#1B2838' }}>{cam.name}</span>
@@ -270,12 +270,12 @@ export default function SOCDashboard() {
               Analyzing security events and threat patterns...
             </div>
           )}
-          {!analyzing && analysis && (
-            <div style={{ maxHeight: 600, overflowY: 'auto', fontSize: 13, lineHeight: 1.8, whiteSpace: 'pre-wrap', fontFamily: 'inherit', color: '#1B2838', padding: 8 }}>
-              {analysis}
+          {!analyzing && analysis !== null && (
+            <div style={{ maxHeight: 600, overflowY: 'auto', padding: 8 }}>
+              <AIReport response={analysis} title="AI Threat Analysis" />
             </div>
           )}
-          {!analyzing && !analysis && <div style={{ padding: 32, textAlign: 'center', color: '#ccc' }}>Click "Run Analysis" or "Analyze Threats" to get an AI-powered threat assessment.</div>}
+          {!analyzing && analysis === null && <div style={{ padding: 32, textAlign: 'center', color: '#ccc' }}>Click "Run Analysis" or "Analyze Threats" to get an AI-powered threat assessment.</div>}
         </div>
       </div>
     </div>
