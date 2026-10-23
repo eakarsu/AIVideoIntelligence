@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { FaPlus, FaSearch } from 'react-icons/fa';
-import { fetchList, createRecord } from '../api';
+import { fetchList, createRecord, updateRecord, deleteRecord } from '../api';
 import { getModule } from '../modules';
 
 function StatusBadge({ value }) {
@@ -29,6 +29,8 @@ export default function ModulePage() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [selectedRow, setSelectedRow] = useState(null);
+  const [editingRow, setEditingRow] = useState(null);
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
 
@@ -46,8 +48,13 @@ export default function ModulePage() {
     e.preventDefault();
     setSaving(true);
     try {
-      await createRecord(name, form);
+      if (editingRow) {
+        await updateRecord(name, editingRow.id, form);
+      } else {
+        await createRecord(name, form);
+      }
       setShowCreate(false);
+      setEditingRow(null);
       setForm({});
       load();
     } catch (err) {
@@ -92,7 +99,7 @@ export default function ModulePage() {
             </thead>
             <tbody>
               {data.map(row => (
-                <tr key={row.id} onClick={() => navigate(`/module/${name}/${row.id}`)}>
+                <tr key={row.id} onClick={() => setSelectedRow(row)} style={{ cursor: "pointer" }}>
                   {mod.columns.map(col => (
                     <td key={col}><CellValue col={col} value={row[col]} /></td>
                   ))}
@@ -106,9 +113,35 @@ export default function ModulePage() {
         </div>
       )}
 
+      {selectedRow && (
+        <div className="modal-overlay" onClick={() => setSelectedRow(null)}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{selectedRow[mod.fields[0]?.name] || `Record #${selectedRow.id}`}</h3>
+              <button className="modal-close" onClick={() => setSelectedRow(null)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="detail-grid" style={{ marginBottom: 20 }}>
+                {mod.fields.map(f => (
+                  <div key={f.name} className="detail-field">
+                    <label>{f.label}</label>
+                    <div className="value"><CellValue col={f.name} value={selectedRow[f.name]} /></div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button type="button" className="btn btn-primary" onClick={() => { setEditingRow(selectedRow); setForm(selectedRow); setSelectedRow(null); setShowCreate(true); }}>Edit</button>
+                <button type="button" className="btn btn-danger" onClick={async () => { if (window.confirm("Delete this record?")) { await deleteRecord(name, selectedRow.id); setSelectedRow(null); load(); } }}>Delete</button>
+                <button type="button" className="btn btn-outline" onClick={() => setSelectedRow(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showCreate && (
         <div className="modal-overlay" onClick={() => setShowCreate(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3>New {mod.name.replace(/s$/, '')}</h3>
               <button className="modal-close" onClick={() => setShowCreate(false)}>&times;</button>

@@ -371,6 +371,30 @@ export default function DeviceRegistry() {
         </div>
       </div>
 
+      {selectedDevice && (
+        <div onClick={() => setSelectedDevice(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9998 }}>
+          <div role="dialog" aria-modal="true" onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 24, width: "min(620px, 92vw)", maxHeight: "85vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h2 style={{ margin: 0, fontSize: 18, color: "#1A2233" }}>{selectedDevice.name}</h2>
+              <button type="button" onClick={() => setSelectedDevice(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><FaTimes size={16} /></button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+              {[["Type", selectedDevice.device_type], ["Status", selectedDevice.status], ["IP Address", selectedDevice.ip_address], ["MAC Address", selectedDevice.mac_address], ["Property", selectedDevice.property_name], ["Subnet", selectedDevice.subnet]].map(([k, v]) => (
+                <div key={k} style={{ padding: 10, border: "1px solid #E8EBF0", borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: "#6A6D70" }}>{k}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#1A2233" }}>{v || "—"}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setSelectedDevice(null)} style={{ padding: "8px 16px", background: "#0854A0", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>Edit</button>
+              <button type="button" onClick={() => { setDevices(devices.filter(x => x.id !== selectedDevice.id)); setSelectedDevice(null); }} style={{ padding: "8px 16px", background: "#BB0000", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>Delete</button>
+              <button type="button" onClick={() => setSelectedDevice(null)} style={{ padding: "8px 16px", background: "#F0F2F5", color: "#354A5F", border: "1px solid #DDE1E6", borderRadius: 6, cursor: "pointer" }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Network Scan Results Modal */}
       {scanResult && (
         <div onClick={() => setScanResult(null)} style={{

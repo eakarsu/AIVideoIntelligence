@@ -1626,6 +1626,7 @@ app.use('/api/gap-no-formal-compliance-reporting-export', require('./routes/gapN
 app.use('/api/gap-no-notifications-subsystem-alerts-only', require('./routes/gapNoNotificationsSubsystemAlertsOnly'));
 
 // === VideoAI Custom Views (mounted BEFORE 404) ===
+app.use('/api/featurepack', auth, require('./featurepack').createFeaturePackRouter({ listRecords: async () => (await pool.query('SELECT * FROM incidents ORDER BY created_at DESC LIMIT 200')).rows }));
 app.use('/api/custom-views', require('./routes/customViews'));
 
 async function start(){try{const ready=await pool.query("SELECT to_regclass('public.evidence_workflows') AS workflow, to_regclass('public.evidence_workflow_audit') AS audit");if(!ready.rows[0].workflow||!ready.rows[0].audit)throw new Error('database migrations are pending; run npm run migrate');await loadSimCache();server.listen(PORT,()=>console.log(`Vigilance AI Backend running on http://localhost:${PORT}`));}catch(e){console.error('[startup] schema readiness failed:',e.message);process.exit(1);}}start();
